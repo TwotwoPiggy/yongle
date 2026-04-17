@@ -837,17 +837,26 @@ function cmdValidateHealth(cwd, options, raw) {
     } catch { /* parse error already caught in Check 5 */ }
   }
 
-  // ─── Check 11: Stale / orphan git worktrees (#2167) ────────────────────────
+  // ─── Check 11: Stale / orphan git worktrees (#2167, #2353) ─────────────────
   try {
     const worktreeResult = execGit(cwd, ['worktree', 'list', '--porcelain']);
     if (worktreeResult.exitCode === 0 && worktreeResult.stdout) {
       const blocks = worktreeResult.stdout.split('\n\n').filter(Boolean);
       // Skip the first block — it is always the main worktree
+      const nonMainCount = blocks.length - 1;
       for (let i = 1; i < blocks.length; i++) {
         const lines = blocks[i].split('\n');
         const wtLine = lines.find(l => l.startsWith('worktree '));
         if (!wtLine) continue;
         const wtPath = wtLine.slice('worktree '.length);
+
+        // W018: detached HEAD — a worktree entry has no "branch" line (#2353)
+        const isDetached = lines.some(l => l.trim() === 'detached');
+        if (isDetached) {
+          addIssue('warning', 'W018',
+            `Detached HEAD worktree: ${wtPath}`,
+            `Run: git -C "${wtPath}" checkout -b <branch-name>  (or remove with: git worktree remove "${wtPath}" --force)`);
+        }
 
         if (!fs.existsSync(wtPath)) {
           // Orphan: path no longer exists on disk
@@ -867,6 +876,14 @@ function cmdValidateHealth(cwd, options, raw) {
             }
           } catch { /* stat failed — skip */ }
         }
+      }
+
+      // W019: too many non-main worktrees (#2353)
+      const WORKTREE_COUNT_THRESHOLD = 10;
+      if (nonMainCount > WORKTREE_COUNT_THRESHOLD) {
+        addIssue('warning', 'W019',
+          `${nonMainCount} active worktrees — consider pruning stale ones`,
+          'Run: git worktree prune  (then manually remove any no longer needed)');
       }
     }
   } catch { /* git worktree not available or not a git repo — skip silently */ }
