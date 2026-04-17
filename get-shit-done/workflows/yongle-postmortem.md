@@ -35,7 +35,9 @@ cause_summary: "<一句话精炼根因>"               # 30字以内，直接说
 if [ "$SCOPE" = "local" ]; then
   ARCHIVE_DIR=".planning/knowledge"
 else
-  ARCHIVE_DIR="$HOME/.yongle_knowledge"
+  # Windows PowerShell 兼容处理: $HOME 为空时回退到 $USERPROFILE
+  HOME_DIR="${HOME:-$USERPROFILE}"
+  ARCHIVE_DIR="${HOME_DIR}/.yongle_knowledge"
 fi
 mkdir -p "$ARCHIVE_DIR"
 ```
@@ -115,6 +117,7 @@ AskUserQuestion(
 
 生成日期时间戳前缀：
 ```bash
+# 生成跨平台兼容的时间戳
 TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
 DRAFT_FILENAME="${TIMESTAMP}-${SLUG}.draft.md"
 DRAFT_PATH="${ARCHIVE_DIR}/${DRAFT_FILENAME}"
@@ -201,33 +204,35 @@ AskUserQuestion(
 
 若用户选择"直接确认归档"或"已编辑完毕现在归档"：
 
-```bash
-# 读取草稿（可能已被用户手动编辑）
-FINAL_FILENAME="${TIMESTAMP}-${SLUG}.md"
-FINAL_PATH="${ARCHIVE_DIR}/${FINAL_FILENAME}"
+1. **处理文件转移**：
+   ```bash
+   FINAL_FILENAME="${TIMESTAMP}-${SLUG}.md"
+   FINAL_PATH="${ARCHIVE_DIR}/${FINAL_FILENAME}"
+   ```
 
-# 将 draft.md 重命名为正式 .md
-mv "$DRAFT_PATH" "$FINAL_PATH"
+2. **清洗元数据（去除 draft 标志）**：
+   读取 `$DRAFT_PATH` 内容，利用大模型能力或简单的文本替换去除 `draft: true` 这一行，然后将结果写入 `$FINAL_PATH`。
 
-# 从文件中去除 draft: true 标志
-# （使用 gsd-sdk 或直接 sed 处理）
-sed -i '/^draft: true$/d' "$FINAL_PATH"
-```
+3. **清理草稿**：
+   ```bash
+   rm "$DRAFT_PATH"
+   ```
 
-更新知识库索引（`INDEX.md`）：
-```bash
-INDEX_PATH="${ARCHIVE_DIR}/INDEX.md"
-# 在索引末尾追加新条目的摘要行
-echo "| {date} | [{id}](./${FINAL_FILENAME}) | {resolution_type} | {cause_summary} | {tags_inline} |" >> "$INDEX_PATH"
-```
+4. **更新或初始化索引（INDEX.md）**：
+   ```bash
+   INDEX_PATH="${ARCHIVE_DIR}/INDEX.md"
+   
+   # 如果索引不存在，先初始化表头
+   if [ ! -f "$INDEX_PATH" ]; then
+     echo "# 永乐大典知识索引" > "$INDEX_PATH"
+     echo "" >> "$INDEX_PATH"
+     echo "| 日期 | 条目ID | 分类 | 根因摘要 | 标签 |" >> "$INDEX_PATH"
+     echo "|------|--------|------|----------|------|" >> "$INDEX_PATH"
+   fi
 
-如果 `INDEX.md` 不存在，先创建带表头的索引文件：
-```markdown
-# 永乐大典知识索引
-
-| 日期 | 条目ID | 分类 | 根因摘要 | 标签 |
-|------|--------|------|----------|------|
-```
+   # 追加新条目摘要行
+   echo "| {date} | [{id}](./${FINAL_FILENAME}) | {resolution_type} | {cause_summary} | {tags_inline} |" >> "$INDEX_PATH"
+   ```
 
 显示完成横幅：
 ```
