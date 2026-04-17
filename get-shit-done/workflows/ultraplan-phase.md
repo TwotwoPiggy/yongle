@@ -12,7 +12,7 @@ affect the core planning pipeline.
 
 Display the stage banner:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  GSD ► ULTRAPLAN PHASE  ⚠ BETA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -34,7 +34,7 @@ echo "$CLAUDE_CODE_VERSION"
 
 If the output is empty or unset, display the following error and exit:
 
-```
+```text
 ╔══════════════════════════════════════════════════════════════╗
 ║  RUNTIME ERROR                                               ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -66,7 +66,7 @@ Parse JSON for: `phase_found`, `phase_number`, `phase_name`, `phase_slug`, `padd
 
 **If `planning_exists` is false:** Error and exit:
 
-```
+```text
 No .planning directory found. Initialize the project first:
 
 /gsd-new-project
@@ -76,7 +76,7 @@ No .planning directory found. Initialize the project first:
 
 Display detected phase:
 
-```
+```text
 Phase {N}: {phase name}
 ```
 
@@ -99,7 +99,7 @@ Build the ultraplan prompt from GSD context.
 
 Construct the prompt:
 
-```
+```text
 Plan phase {phase_number}: {phase_name}
 
 ## Phase Scope (from ROADMAP.md)
@@ -148,7 +148,7 @@ Keep the plan focused and executable.
 Display the return-path instructions **before** triggering ultraplan so they are visible
 in the terminal scroll-back after ultraplan launches:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  WHEN THE PLAN IS READY — WHAT TO DO
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -179,7 +179,7 @@ Launching ultraplan for Phase {N}: {phase_name}...
 
 Trigger ultraplan with the constructed prompt:
 
-```
+```text
 /ultraplan {constructed prompt from build_prompt step}
 ```
 

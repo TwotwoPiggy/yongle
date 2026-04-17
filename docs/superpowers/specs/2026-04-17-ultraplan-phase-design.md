@@ -32,7 +32,7 @@ This is a **beta of a beta**: ultraplan itself is in research preview, so this c
 
 ## Architecture
 
-```
+```text
 /gsd-ultraplan-phase [phase]
         │
         ├─ Runtime gate (CLAUDE_CODE_VERSION check)
@@ -79,7 +79,7 @@ Display GSD `► ULTRAPLAN PHASE [BETA]` banner.
 echo $CLAUDE_CODE_VERSION
 ```
 If unset/empty: print error and exit.
-```
+```text
 ⚠ /gsd-ultraplan-phase requires Claude Code.
   /ultraplan is not available in this runtime.
   Use /gsd-plan-phase for local planning.
@@ -103,7 +103,7 @@ Construct a prompt that includes:
 
 ### 5. Return-Path Instructions Card
 Display prominently before triggering (visible in terminal scroll-back):
-```
+```text
 When ◆ ultraplan ready:
   1. Open the session link in your browser
   2. Review, comment, and revise the plan
@@ -113,7 +113,7 @@ When ◆ ultraplan ready:
 ```
 
 ### 6. Trigger Ultraplan
-```
+```text
 /ultraplan <constructed prompt>
 ```
 

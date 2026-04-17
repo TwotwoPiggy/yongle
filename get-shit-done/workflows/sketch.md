@@ -53,9 +53,9 @@ COMMIT_DOCS=$(gsd-sdk query config-get commit_docs 2>/dev/null || echo "true")
 
 **Otherwise:**
 
-**Text mode (`workflow.text_mode: true` in config or `--text` flag):** Set `TEXT_MODE=true` if `--text` is present in `$ARGUMENTS` OR `text_mode` from init JSON is `true`. When TEXT_MODE is active, replace every `AskUserQuestion` call with a plain-text numbered list and ask the user to type their choice number. This is required for non-Claude runtimes (OpenAI Codex, Gemini CLI, etc.) where `AskUserQuestion` is not available.
+**Text mode:** If TEXT_MODE is enabled (set in the banner step), replace AskUserQuestion calls with plain-text numbered lists — emit the options and ask the user to type the number of their choice.
 
-Before sketching anything, explore the design intent through conversation. Ask one question at a time using AskUserQuestion, with a paragraph of context and reasoning for each.
+Before sketching anything, explore the design intent through conversation. Ask one question at a time — using AskUserQuestion in normal mode, or a plain-text numbered list if TEXT_MODE is active — with a paragraph of context and reasoning for each.
 
 **Questions to cover (adapt to what the user has already shared):**
 
