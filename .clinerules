@@ -25,3 +25,9 @@ Do not make direct repo edits. All changes must go through a GSD workflow:
 ## Safety
 - Use `execFileSync` (array args) not `execSync` (string interpolation)
 - Validate user-provided paths with `validatePath()` from `get-shit-done/bin/lib/security.cjs`
+
+## Yongle Dadian: Active Watching (过程探针)
+If `.planning/yongle/WATCHING.md` exists, you are in a "Deep Review" context.
+- **Continuous Logging**: After every significant action (creating a file, running a test, making a major edit), append a summary of the result and your updated hypothesis to the `## ⏳ 过程时间线 (Timeline)` section of that file.
+- **Context Preservation**: Use this file to store intermediate evidence that might be lost if the chat context is truncated.
+- **Finish**: When the task is successfully completed, remind the user to run `/yongle-postmortem` to archive the session.

@@ -55,18 +55,23 @@ mkdir -p "$ARCHIVE_DIR"
 
 向上回溯当前对话的历史记录，执行以下智能识别：
 
-**2a. 识别问题边界**
+**2a. 检查活跃追踪 (WATCHING.md)**
+- 检查是否存在 `.planning/yongle/WATCHING.md`。
+- 如果存在，将其视为**最高优先级上下文**。文件中的 `Timeline` 记录了 AI 的真实调试轨迹，应优先于大模型的对话回溯记忆。
+- 如果不存在，则按常规方式回溯当前对话。
+
+**2b. 识别问题边界**
 - 定位对话中出现的**第一个报错信号**（如：错误堆栈、Build Failed、Exception、构建中断等关键词）
 - 定位**最终解决方案**（如：用户确认"成功了"、"跑通了"、"好的"等，或最后一次成功的代码运行结果）
 - 如果问题经历了**多次尝试**（失败→重试→成功），将这几次相关的上下文**整体打包**作为分析基础，不裁剪中间的失败尝试（它们是最宝贵的"踩坑记录"）
 
-**2b. 提炼核心内容**：
+**2c. 提炼核心内容**：
 - **根本原因**（Root Cause）：一句话说清为何会出错
-- **调试历程**（Debug Path）：简述尝试了哪些方向，哪些失败了、哪些成功了
+- **调试历程**（Debug Path）：简述尝试了哪些方向，哪些失败了、哪些成功了（结合 WATCHING.md 的 Timeline）
 - **最终解决方案**（Resolution）：最终起作用的具体操作步骤
 - **防复发建议**（Prevention）：下次如何避免类似问题
 
-**2c. 填充元数据**：
+**2d. 填充元数据**：
 - 根据内容推断 `resolution_type`
 - 根据涉及的技术栈提取 `tags`（如: dotnet, ef-core, build, migrations, docker）
 - `host_agent` 设置为当前宿主环境（如 `antigravity`）
@@ -213,9 +218,13 @@ AskUserQuestion(
 2. **清洗元数据（去除 draft 标志）**：
    读取 `$DRAFT_PATH` 内容，利用大模型能力或简单的文本替换去除 `draft: true` 这一行，然后将结果写入 `$FINAL_PATH`。
 
-3. **清理草稿**：
+3. **清理草稿与追踪文件**：
    ```bash
    rm "$DRAFT_PATH"
+   # 同时清理活跃追踪文件
+   if [ -f ".planning/yongle/WATCHING.md" ]; then
+     rm ".planning/yongle/WATCHING.md"
+   fi
    ```
 
 4. **更新或初始化索引（INDEX.md）**：
