@@ -209,7 +209,11 @@ AskUserQuestion(
 
 若用户选择"直接确认归档"或"已编辑完毕现在归档"：
 
-1. **处理文件转移**：
+1. **处理文件转移与分类**：
+   - 识别知识条目中的内容：
+     - 若包含 **风格 (Style)**、**思维模式 (Thoughts)** 或 **通用模式 (Patterns)**：将对应片段同步至 `~/.yongle_knowledge/memory/` 下的对应分类，并更新 `memory/INDEX.json`。
+     - 核心知识本位依然存入 `$ARCHIVE_DIR`。
+
    ```bash
    FINAL_FILENAME="${TIMESTAMP}-${SLUG}.md"
    FINAL_PATH="${ARCHIVE_DIR}/${FINAL_FILENAME}"

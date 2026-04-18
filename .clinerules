@@ -26,8 +26,10 @@ Do not make direct repo edits. All changes must go through a GSD workflow:
 - Use `execFileSync` (array args) not `execSync` (string interpolation)
 - Validate user-provided paths with `validatePath()` from `get-shit-done/bin/lib/security.cjs`
 
-## Yongle Dadian: Active Watching (过程探针)
-If `.planning/yongle/WATCHING.md` exists, you are in a "Deep Review" context.
-- **Continuous Logging**: After every significant action (creating a file, running a test, making a major edit), append a summary of the result and your updated hypothesis to the `## ⏳ 过程时间线 (Timeline)` section of that file.
-- **Context Preservation**: Use this file to store intermediate evidence that might be lost if the chat context is truncated.
-- **Finish**: When the task is successfully completed, remind the user to run `/yongle-postmortem` to archive the session.
+## Yongle Dadian: Active Watching & Passive Recall (过程探针与对齐)
+- **Active Watching**: If `.planning/yongle/WATCHING.md` exists, append a summary of your actions to the `Timeline` after every significant step.
+- **Passive Recall**: At the start of a task, or if you detect a "mismatch" in style/logic (e.g., user corrects your code style or communication tone), check `~/.yongle_knowledge/memory/INDEX.json`.
+- **Self-Correction**: If a relevant topic exists in the memory index, use `/yongle-recall <topic>` to pull the style/decision into your context before continuing.
+- **Background Dreaming**: If the user is idle, the `yongle-dreamer.js` script may be running. It uses `.planning/yongle/dream_buffer.jsonl` to store progress.
+- **Finish**: When a task is completed, remind the user to run `/yongle-postmortem` to archive findings.
+
