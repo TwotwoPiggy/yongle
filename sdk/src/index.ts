@@ -320,6 +320,12 @@ export type { WSTransportOptions } from './ws-transport.js';
 // Workstream utilities
 export { validateWorkstreamName, relPlanningPath } from './workstream-utils.js';
 
+// Sync & Cloud Push
+export { GitProvider } from './git-provider.js';
+export { SyncEngine } from './sync-engine.js';
+export type { GitResult } from './git-provider.js';
+export type { SyncOptions } from './sync-engine.js';
+
 // Init workflow
 export { InitRunner } from './init-runner.js';
 export type { InitRunnerDeps } from './init-runner.js';

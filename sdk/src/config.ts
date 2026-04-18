@@ -11,33 +11,14 @@ import { relPlanningPath } from './workstream-utils.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export interface GitConfig {
-  branching_strategy: string;
-  phase_branch_template: string;
-  milestone_branch_template: string;
-  quick_branch_template: string | null;
+export interface SyncConfig {
+  mode: 'auto' | 'manual' | 'both';
+  global_repo_url: string | null;
+  non_git_fallback: 'fallback' | 'local_only';
 }
 
-export interface WorkflowConfig {
-  research: boolean;
-  plan_check: boolean;
-  verifier: boolean;
-  nyquist_validation: boolean;
-  auto_advance: boolean;
-  node_repair: boolean;
-  node_repair_budget: number;
-  ui_phase: boolean;
-  ui_safety_gate: boolean;
-  text_mode: boolean;
-  research_before_questions: boolean;
-  discuss_mode: string;
-  skip_discuss: boolean;
-  /** Maximum self-discuss passes in auto/headless mode before forcing proceed. Default: 3. */
-  max_discuss_passes: number;
-}
-
-export interface HooksConfig {
-  context_warnings: boolean;
+export interface YongleConfig {
+  sync: SyncConfig;
 }
 
 export interface GSDConfig {
@@ -51,6 +32,7 @@ export interface GSDConfig {
   git: GitConfig;
   workflow: WorkflowConfig;
   hooks: HooksConfig;
+  yongle: YongleConfig;
   agent_skills: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -89,6 +71,13 @@ export const CONFIG_DEFAULTS: GSDConfig = {
   },
   hooks: {
     context_warnings: true,
+  },
+  yongle: {
+    sync: {
+      mode: 'manual',
+      global_repo_url: null,
+      non_git_fallback: 'fallback',
+    },
   },
   agent_skills: {},
 };
@@ -138,7 +127,10 @@ export async function loadConfig(projectDir: string, workstream?: string): Promi
     throw new Error(`Config at ${configPath} must be a JSON object`);
   }
 
-  // Three-level deep merge: defaults <- parsed
+  // Multi-level deep merge: defaults <- parsed
+  const yongleParsed = parsed.yongle as Partial<YongleConfig> ?? {};
+  const yongleSyncParsed = yongleParsed.sync as Partial<SyncConfig> ?? {};
+
   return {
     ...structuredClone(CONFIG_DEFAULTS),
     ...parsed,
@@ -153,6 +145,14 @@ export async function loadConfig(projectDir: string, workstream?: string): Promi
     hooks: {
       ...CONFIG_DEFAULTS.hooks,
       ...(parsed.hooks as Partial<HooksConfig> ?? {}),
+    },
+    yongle: {
+      ...CONFIG_DEFAULTS.yongle,
+      ...yongleParsed,
+      sync: {
+        ...CONFIG_DEFAULTS.yongle.sync,
+        ...yongleSyncParsed,
+      },
     },
     agent_skills: {
       ...CONFIG_DEFAULTS.agent_skills,

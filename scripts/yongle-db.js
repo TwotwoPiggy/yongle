@@ -30,18 +30,7 @@ function init() {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
-    const schema = `
-        CREATE TABLE IF NOT EXISTS entries (
-            id TEXT PRIMARY KEY,
-            date TEXT,
-            resolution_type TEXT,
-            cause_summary TEXT,
-            tags TEXT,
-            filepath TEXT,
-            source TEXT,
-            last_indexed DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-    `;
+    const schema = "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, date TEXT, resolution_type TEXT, cause_summary TEXT, tags TEXT, filepath TEXT, source TEXT, last_indexed DATETIME DEFAULT CURRENT_TIMESTAMP);";
     runSql(schema);
     console.log(`Database initialized at ${DB_PATH}`);
 }
