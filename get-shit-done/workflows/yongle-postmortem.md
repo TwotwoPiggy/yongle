@@ -245,6 +245,10 @@ AskUserQuestion(
 
    # 追加新条目摘要行
    echo "| {date} | [{id}](./${FINAL_FILENAME}) | {resolution_type} | {cause_summary} | {tags_inline} |" >> "$INDEX_PATH"
+
+   # 5. 更新 SQLite 索引
+   # 确定 SCOPE 和 DATA_JSON (逻辑同 confirm)
+   node gsd-yongle/scripts/yongle-db.js upsert "$SCOPE" "$DATA_JSON"
    ```
 
 显示完成横幅：

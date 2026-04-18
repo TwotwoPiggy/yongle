@@ -88,6 +88,17 @@ AskUserQuestion(
 
    # 追加摘要行
    echo "| {date} | [{id}](./${FINAL_FILENAME}) | {resolution_type} | {cause_summary} | {tags_inline} |" >> "$INDEX_PATH"
+
+   # 5. 更新 SQLite 索引
+   # 首先确定 SCOPE
+   if [[ "$DRAFT_PATH" == *".planning/knowledge"* ]]; then
+     DB_SCOPE="local"
+   else
+     DB_SCOPE="global"
+   fi
+   # 准备数据 JSON
+   DATA_JSON="{\"id\": \"$ID\", \"date\": \"$DATE\", \"resolution_type\": \"$TYPE\", \"cause_summary\": \"$SUMMARY\", \"tags\": [${TAGS_ARRAY}], \"filepath\": \"$FINAL_PATH\"}"
+   node gsd-yongle/scripts/yongle-db.js upsert "$DB_SCOPE" "$DATA_JSON"
    ```
 
 4. **清理旧文件**：
