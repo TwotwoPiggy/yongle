@@ -6,11 +6,12 @@ const ARGS = process.argv.slice(2);
 const COMMAND = ARGS[0]; // init | upsert | query
 const SCOPE = ARGS[1]; // global | local
 
-const HOME = process.env.HOME || process.env.USERPROFILE;
+const HOME = process.env.YONGLE_HOME || process.env.HOME || process.env.USERPROFILE;
 const GLOBAL_DB_PATH = path.join(HOME, '.yongle_knowledge', 'yongle.db');
 const LOCAL_DB_PATH = path.join(process.cwd(), '.planning', 'yongle', 'yongle.db');
 
-const DB_PATH = SCOPE === 'local' ? LOCAL_DB_PATH : GLOBAL_DB_PATH;
+// Allow explicitly setting the DB path for testing
+const DB_PATH = process.env.YONGLE_DB_PATH || (SCOPE === 'local' ? LOCAL_DB_PATH : GLOBAL_DB_PATH);
 
 function runSql(sql) {
     // Escape single quotes for shell

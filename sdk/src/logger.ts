@@ -111,3 +111,8 @@ export class GSDLogger {
     this.output.write(JSON.stringify(entry) + '\n');
   }
 }
+
+// Global default logger instance
+export const logger = new GSDLogger({
+  level: (process.env.GSD_LOG_LEVEL as LogLevel) ?? 'info',
+});

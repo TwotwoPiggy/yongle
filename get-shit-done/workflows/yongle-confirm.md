@@ -1,4 +1,4 @@
-﻿<purpose>
+<purpose>
 灏嗘案涔愬ぇ鍏歌崏绋匡紙.draft.md锛夋寮忓綊妗ｃ€傛敮鎸佺洿鎺ユ寚瀹氭枃浠惰矾寰勶紝鎴栬€呭湪鏈寚瀹氭椂鑷姩鎵弿骞跺垪鍑烘墍鏈夎崏绋夸緵鐢ㄦ埛閫夋嫨銆?</purpose>
 
 <process>
@@ -37,6 +37,9 @@ ARCHIVE_DIR="${HOME_DIR}/.yongle_knowledge"
 纭褰掓。锛?```
 
 ```
+> [!IMPORTANT]
+> **AUTOMATION HOOK**: If `YONGLE_TEST_MODE` is "true", automatically select the first option ("✅ 确认归档") and skip the interactive prompt.
+
 AskUserQuestion(
   header: "纭褰掓。",
   question: "鏄惁灏嗘鑽夌姝ｅ紡瀛樺叆鐭ヨ瘑搴擄紵",

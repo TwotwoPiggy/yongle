@@ -1,4 +1,4 @@
-﻿<purpose>
+<purpose>
 姘镐箰澶у吀锛圷ongle Dadian锛夊鐩樺紩鎿庛€傚湪 AI 杈呭姪寮€鍙戣繃绋嬩腑锛屽綋涓€涓?Bug 琚В鍐虫垨鏌愰」浠诲姟鏈€缁堣窇閫氬悗锛屾彁鍙栬繖娈靛璇濅腑鐨勬牳蹇冮敊璇俊鎭€佽皟璇曡繃绋嬩笌瑙ｅ喅鏂规锛屽皢鍏跺嚌缁冧负缁撴瀯鍖栫殑鐭ヨ瘑鏉＄洰骞惰繘琛屼袱娈靛紡钀界洏锛堣崏绋?鈫?纭褰掓。锛夈€?</purpose>
 
 <knowledge_schema>
@@ -73,6 +73,9 @@ mkdir -p "$ARCHIVE_DIR"
 纭鍐欏叆鑽夌锛?```
 
 ```
+> [!IMPORTANT]
+> **AUTOMATION HOOK**: If `YONGLE_TEST_MODE` is "true", automatically select the first option ("✅ 确认，写入草稿") and skip the interactive prompt.
+
 AskUserQuestion(
   header: "姘镐箰澶у吀 鈥?褰掓。纭",
   question: "浠ヤ笂鍒嗘瀽鍑嗙‘鍚楋紵",
@@ -139,6 +142,9 @@ draft: true
 ---
 
 **Step 5: 浜哄伐瀹￠槄纭**
+
+> [!IMPORTANT]
+> **AUTOMATION HOOK**: If `YONGLE_TEST_MODE` is "true", automatically select the first option ("✅ 直接确认归档") and skip the interactive prompt.
 
 ```
 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹? 姘镐箰澶у吀 鈻?璇峰闃呰崏绋?鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
