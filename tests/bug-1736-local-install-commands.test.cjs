@@ -46,7 +46,25 @@ describe('#1736: local Claude install populates .claude/commands/gsd/', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    // Retry cleanup on Windows to avoid EPERM file locking issues (#1736)
+    let retries = 5;
+    while (retries > 0) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        break;
+      } catch (e) {
+        if (e.code === 'EPERM' && retries > 1) {
+          retries--;
+          // Small sync sleep
+          const start = Date.now();
+          while (Date.now() - start < 100) {}
+          continue;
+        }
+        // If it still fails, just warn but don't fail the test
+        console.warn(`  ⚠ Cleanup failed for ${tmpDir}: ${e.message}`);
+        break;
+      }
+    }
   });
 
   test('local install creates .claude/commands/gsd/ directory', (t) => {
