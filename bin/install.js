@@ -10,6 +10,8 @@ const crypto = require('crypto');
 const cyan = '\x1b[36m';
 const green = '\x1b[32m';
 const yellow = '\x1b[33m';
+const red = '\x1b[31m';
+const bold = '\x1b[1m';
 const dim = '\x1b[2m';
 const reset = '\x1b[0m';
 
@@ -76,7 +78,15 @@ const hasCline = args.includes('--cline');
 const hasBoth = args.includes('--both'); // Legacy flag, keeps working
 const hasAll = args.includes('--all');
 const hasUninstall = args.includes('--uninstall') || args.includes('-u');
+const hasSkillsRoot = args.includes('--skills-root');
 const hasPortableHooks = args.includes('--portable-hooks') || process.env.GSD_PORTABLE_HOOKS === '1';
+const hasSdk = args.includes('--sdk');
+const hasNoSdk = args.includes('--no-sdk');
+
+if (hasSdk && hasNoSdk) {
+  console.error(`  ${yellow}Cannot specify both --sdk and --no-sdk${reset}`);
+  process.exit(1);
+}
 
 // Runtime selection - can be set by flags or interactive prompt
 let selectedRuntimes = [];
@@ -429,7 +439,7 @@ const explicitConfigDir = parseConfigDirArg();
 const hasHelp = args.includes('--help') || args.includes('-h');
 const forceStatusline = args.includes('--force-statusline');
 
-console.log(banner);
+if (!hasSkillsRoot) console.log(banner);
 
 if (hasUninstall) {
   console.log('  Mode: Uninstall\n');
@@ -997,9 +1007,15 @@ function convertClaudeToAntigravityContent(content, isGlobal = false) {
   if (isGlobal) {
     c = c.replace(/\$HOME\/\.claude\//g, '$HOME/.gemini/antigravity/');
     c = c.replace(/~\/\.claude\//g, '~/.gemini/antigravity/');
+    // Bare form (no trailing slash) — must come after slash form to avoid double-replace
+    c = c.replace(/\$HOME\/\.claude\b/g, '$HOME/.gemini/antigravity');
+    c = c.replace(/~\/\.claude\b/g, '~/.gemini/antigravity');
   } else {
     c = c.replace(/\$HOME\/\.claude\//g, '.agent/');
     c = c.replace(/~\/\.claude\//g, '.agent/');
+    // Bare form (no trailing slash) — must come after slash form to avoid double-replace
+    c = c.replace(/\$HOME\/\.claude\b/g, '.agent');
+    c = c.replace(/~\/\.claude\b/g, '.agent');
   }
   c = c.replace(/\.\/\.claude\//g, './.agent/');
   c = c.replace(/\.claude\//g, '.agent/');
@@ -5451,9 +5467,12 @@ function install(isGlobal, runtime = 'claude') {
   // For global installs: use $HOME/ so paths expand correctly inside double-quoted
   // shell commands (~ does NOT expand inside double quotes, causing MODULE_NOT_FOUND).
   // For local installs: use resolved absolute path (may be outside $HOME).
+  // Exception: OpenCode on Windows does not expand $HOME in @file references —
+  // use the absolute path instead so @$HOME/... references resolve correctly (#2376).
   const resolvedTarget = path.resolve(targetDir).replace(/\\/g, '/');
   const homeDir = os.homedir().replace(/\\/g, '/');
-  const pathPrefix = isGlobal && resolvedTarget.startsWith(homeDir)
+  const isWindowsHost = process.platform === 'win32';
+  const pathPrefix = isGlobal && resolvedTarget.startsWith(homeDir) && !(isOpencode && isWindowsHost)
     ? '$HOME' + resolvedTarget.slice(homeDir.length) + '/'
     : `${resolvedTarget}/`;
 
@@ -5819,6 +5838,7 @@ function install(isGlobal, runtime = 'claude') {
             let content = fs.readFileSync(srcFile, 'utf8');
             content = content.replace(/'\.claude'/g, configDirReplacement);
             content = content.replace(/\/\.claude\//g, `/${getDirName(runtime)}/`);
+            content = content.replace(/\.claude\//g, `${getDirName(runtime)}/`);
             if (isQwen) {
               content = content.replace(/CLAUDE\.md/g, 'QWEN.md');
               content = content.replace(/\bClaude Code\b/g, 'Qwen Code');
@@ -5944,6 +5964,7 @@ function install(isGlobal, runtime = 'claude') {
           let content = fs.readFileSync(srcFile, 'utf8');
           content = content.replace(/'\.claude'/g, configDirReplacement);
           content = content.replace(/\/\.claude\//g, `/${getDirName(runtime)}/`);
+          content = content.replace(/\.claude\//g, `${getDirName(runtime)}/`);
           content = content.replace(/\{\{GSD_VERSION\}\}/g, pkg.version);
           fs.writeFileSync(destFile, content);
           try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
@@ -6628,6 +6649,199 @@ function promptLocation(runtimes) {
 }
 
 /**
+ * Build `@gsd-build/sdk` from the in-repo `sdk/` source tree and install the
+ * resulting `gsd-sdk` binary globally so workflow commands that shell out to
+ * `gsd-sdk query …` succeed.
+ *
+ * We build from source rather than `npm install -g @gsd-build/sdk` because the
+ * npm-published package lags the source tree and shipping a stale SDK breaks
+ * every /gsd-* command that depends on newer query handlers.
+ *
+ * Skip if --no-sdk. Skip if already on PATH (unless --sdk was explicit).
+ * Failures are FATAL — we exit non-zero so install does not complete with a
+ * silently broken SDK (issue #2439). Set GSD_ALLOW_OFF_PATH=1 to downgrade the
+ * post-install PATH verification to a warning (exit code 2) for users with an
+ * intentionally restricted PATH who will wire things up manually.
+ */
+
+/**
+ * Resolve `gsd-sdk` on PATH. Uses `command -v` via `sh -c` on POSIX (portable
+ * across sh/bash/zsh) and `where` on Windows. Returns trimmed path or null.
+ */
+function resolveGsdSdk() {
+  const { spawnSync } = require('child_process');
+  if (process.platform === 'win32') {
+    const r = spawnSync('where', ['gsd-sdk'], { encoding: 'utf-8' });
+    if (r.status === 0 && r.stdout && r.stdout.trim()) {
+      return r.stdout.trim().split('\n')[0].trim();
+    }
+    return null;
+  }
+  const r = spawnSync('sh', ['-c', 'command -v gsd-sdk'], { encoding: 'utf-8' });
+  if (r.status === 0 && r.stdout && r.stdout.trim()) {
+    return r.stdout.trim();
+  }
+  return null;
+}
+
+/**
+ * Best-effort detection of the user's shell rc file for PATH remediation hints.
+ */
+function detectShellRc() {
+  const path = require('path');
+  const shell = process.env.SHELL || '';
+  const home = process.env.HOME || '~';
+  if (/\/zsh$/.test(shell)) return { shell: 'zsh', rc: path.join(home, '.zshrc') };
+  if (/\/bash$/.test(shell)) return { shell: 'bash', rc: path.join(home, '.bashrc') };
+  if (/\/fish$/.test(shell)) return { shell: 'fish', rc: path.join(home, '.config', 'fish', 'config.fish') };
+  return { shell: 'sh', rc: path.join(home, '.profile') };
+}
+
+/**
+ * Emit a red fatal banner and exit. Prints actionable PATH remediation when
+ * the global install succeeded but the bin dir is not on PATH.
+ *
+ * If exitCode is 2, this is the "off-PATH" case and GSD_ALLOW_OFF_PATH respect
+ * is applied by the caller; we only print.
+ */
+function emitSdkFatal(reason, { globalBin, exitCode }) {
+  const { shell, rc } = detectShellRc();
+  const bar = '━'.repeat(72);
+  const redBold = `${red}${bold}`;
+
+  console.error('');
+  console.error(`${redBold}${bar}${reset}`);
+  console.error(`${redBold}  ✗ GSD SDK install failed — /gsd-* commands will not work${reset}`);
+  console.error(`${redBold}${bar}${reset}`);
+  console.error(`  ${red}Reason:${reset} ${reason}`);
+
+  if (globalBin) {
+    console.error('');
+    console.error(`  ${yellow}gsd-sdk was installed to:${reset}`);
+    console.error(`    ${cyan}${globalBin}${reset}`);
+    console.error('');
+    console.error(`  ${yellow}Your shell's PATH does not include this directory.${reset}`);
+    console.error(`  Add it by running:`);
+    if (shell === 'fish') {
+      console.error(`    ${cyan}fish_add_path "${globalBin}"${reset}`);
+      console.error(`    (or append to ${rc})`);
+    } else {
+      console.error(`    ${cyan}echo 'export PATH="${globalBin}:$PATH"' >> ${rc}${reset}`);
+      console.error(`    ${cyan}source ${rc}${reset}`);
+    }
+    console.error('');
+    console.error(`  Then verify: ${cyan}command -v gsd-sdk${reset}`);
+    if (exitCode === 2) {
+      console.error('');
+      console.error(`  ${dim}(GSD_ALLOW_OFF_PATH=1 set → exit ${exitCode} instead of hard failure)${reset}`);
+    }
+  } else {
+    console.error('');
+    console.error(`  Build manually to retry:`);
+    console.error(`    ${cyan}cd <install-dir>/sdk && npm install && npm run build && npm install -g .${reset}`);
+  }
+
+  console.error(`${redBold}${bar}${reset}`);
+  console.error('');
+  process.exit(exitCode);
+}
+
+function installSdkIfNeeded() {
+  if (hasNoSdk) {
+    console.log(`\n  ${dim}Skipping GSD SDK install (--no-sdk)${reset}`);
+    return;
+  }
+
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const fs = require('fs');
+
+  if (!hasSdk) {
+    const resolved = resolveGsdSdk();
+    if (resolved) {
+      console.log(`  ${green}✓${reset} GSD SDK already installed (gsd-sdk on PATH at ${resolved})`);
+      return;
+    }
+  }
+
+  // Locate the in-repo sdk/ directory relative to this installer file.
+  // For global npm installs this resolves inside the published package dir;
+  // for git-based installs (npx github:..., local clone) it resolves to the
+  // repo's sdk/ tree. Both contain the source tree because root package.json
+  // includes "sdk" in its `files` array.
+  const sdkDir = path.resolve(__dirname, '..', 'sdk');
+  const sdkPackageJson = path.join(sdkDir, 'package.json');
+
+  if (!fs.existsSync(sdkPackageJson)) {
+    emitSdkFatal(`SDK source tree not found at ${sdkDir}.`, { globalBin: null, exitCode: 1 });
+  }
+
+  console.log(`\n  ${cyan}Building GSD SDK from source (${sdkDir})…${reset}`);
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+  // 1. Install sdk build-time dependencies (tsc, etc.)
+  const installResult = spawnSync(npmCmd, ['install'], { cwd: sdkDir, stdio: 'inherit' });
+  if (installResult.status !== 0) {
+    emitSdkFatal('Failed to `npm install` in sdk/.', { globalBin: null, exitCode: 1 });
+  }
+
+  // 2. Compile TypeScript → sdk/dist/
+  const buildResult = spawnSync(npmCmd, ['run', 'build'], { cwd: sdkDir, stdio: 'inherit' });
+  if (buildResult.status !== 0) {
+    emitSdkFatal('Failed to `npm run build` in sdk/.', { globalBin: null, exitCode: 1 });
+  }
+
+  // 3. Install the built package globally so `gsd-sdk` lands on PATH.
+  const globalResult = spawnSync(npmCmd, ['install', '-g', '.'], { cwd: sdkDir, stdio: 'inherit' });
+  if (globalResult.status !== 0) {
+    emitSdkFatal('Failed to `npm install -g .` from sdk/.', { globalBin: null, exitCode: 1 });
+  }
+
+  // 3a. Explicitly chmod dist/cli.js to 0o755 in the global install location.
+  // `tsc` emits files at process umask (typically 0o644 — non-executable), and
+  // `npm install -g` from a local directory does NOT chmod bin-script targets the
+  // way tarball extraction does. Without this, the `gsd-sdk` bin symlink points at
+  // a non-executable file and `command -v gsd-sdk` fails on every first install
+  // (root cause of #2453). Mirrors the pattern used for hook files in this installer.
+  try {
+    const prefixRes = spawnSync(npmCmd, ['config', 'get', 'prefix'], { encoding: 'utf-8' });
+    if (prefixRes.status === 0) {
+      const npmPrefix = (prefixRes.stdout || '').trim();
+      const sdkPkg = JSON.parse(fs.readFileSync(path.join(sdkDir, 'package.json'), 'utf-8'));
+      const sdkName = sdkPkg.name; // '@gsd-build/sdk'
+      const globalModulesDir = process.platform === 'win32'
+        ? path.join(npmPrefix, 'node_modules')
+        : path.join(npmPrefix, 'lib', 'node_modules');
+      const cliPath = path.join(globalModulesDir, sdkName, 'dist', 'cli.js');
+      try { fs.chmodSync(cliPath, 0o755); } catch (e) { /* Windows / path not found */ }
+    }
+  } catch (e) { /* Non-fatal: PATH verification in step 4 will catch any real failure */ }
+
+  // 4. Verify gsd-sdk is actually resolvable on PATH. npm's global bin dir is
+  //    not always on the current shell's PATH (Homebrew prefixes, nvm setups,
+  //    unconfigured npm prefix), so a zero exit status from `npm install -g`
+  //    alone is not proof of a working binary (issue #2439 root cause).
+  const resolved = resolveGsdSdk();
+  if (resolved) {
+    console.log(`  ${green}✓${reset} Built and installed GSD SDK from source (gsd-sdk resolved at ${resolved})`);
+    return;
+  }
+
+  // Off-PATH: resolve npm global bin dir for actionable remediation.
+  const prefixResult = spawnSync(npmCmd, ['config', 'get', 'prefix'], { encoding: 'utf-8' });
+  const prefix = prefixResult.status === 0 ? (prefixResult.stdout || '').trim() : null;
+  const globalBin = prefix
+    ? (process.platform === 'win32' ? prefix : path.join(prefix, 'bin'))
+    : null;
+
+  const allowOffPath = process.env.GSD_ALLOW_OFF_PATH === '1';
+  emitSdkFatal(
+    'Built and installed GSD SDK, but `gsd-sdk` is not on your PATH.',
+    { globalBin, exitCode: allowOffPath ? 2 : 1 },
+  );
+}
+
+/**
  * Install GSD for all selected runtimes
  */
 function installAllRuntimes(runtimes, isGlobal, isInteractive) {
@@ -6642,7 +6856,15 @@ function installAllRuntimes(runtimes, isGlobal, isInteractive) {
   const primaryStatuslineResult = results.find(r => statuslineRuntimes.includes(r.runtime));
 
   const finalize = (shouldInstallStatusline) => {
-    // Handle SDK installation before printing final summaries
+    // Build @gsd-build/sdk from the in-repo sdk/ source and install it globally
+    // so `gsd-sdk` lands on PATH. Every /gsd-* command shells out to
+    // `gsd-sdk query …`; without this, commands fail with "command not found:
+    // gsd-sdk". The npm-published @gsd-build/sdk is kept intentionally frozen
+    // at an older version; we always build from source so users get the SDK
+    // that matches the installed GSD version.
+    // Runs by default; skip with --no-sdk. Idempotent when already present.
+    installSdkIfNeeded();
+
     const printSummaries = () => {
       for (const result of results) {
         const useStatusline = statuslineRuntimes.includes(result.runtime) && shouldInstallStatusline;
@@ -6740,7 +6962,17 @@ if (process.env.GSD_TEST_MODE) {
 } else {
 
   // Main logic
-  if (hasGlobal && hasLocal) {
+  if (hasSkillsRoot) {
+    // Print the skills root directory for a given runtime (used by /gsd-sync-skills).
+    // Usage: node install.js --skills-root <runtime>
+    const runtimeArg = args[args.indexOf('--skills-root') + 1];
+    if (!runtimeArg || runtimeArg.startsWith('--')) {
+      console.error('Usage: node install.js --skills-root <runtime>');
+      process.exit(1);
+    }
+    const globalDir = getGlobalDir(runtimeArg, null);
+    console.log(path.join(globalDir, 'skills'));
+  } else if (hasGlobal && hasLocal) {
     console.error(`  ${yellow}Cannot specify both --global and --local${reset}`);
     process.exit(1);
   } else if (explicitConfigDir && hasLocal) {
