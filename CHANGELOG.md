@@ -28,7 +28,14 @@ If you use GSD **as a workflow**—milestones, phases, `.planning/` artifacts, b
 
 ### Fixed
 
+- **`gsd-sdk query` now resolves parent `.planning/` root in multi-repo (`sub_repos`) workspaces** — when invoked from inside a `sub_repos`-listed child repo (e.g. `workspace/app/`), the SDK now walks up to the parent workspace that owns `.planning/`, matching the legacy `gsd-tools.cjs` `findProjectRoot` behavior. Previously `gsd-sdk query init.new-milestone` reported `project_exists: false` from the sub-repo, while `gsd-tools.cjs` resolved the parent root correctly. Resolution happens once in `cli.ts` before dispatch; if `projectDir` already owns `.planning/` (including explicit `--project-dir`), the walk is a no-op. Ported as `findProjectRoot` in `sdk/src/query/helpers.ts` with the same detection order (own `.planning/` wins, then parent `sub_repos` match, then legacy `multiRepo: true`, then `.git` heuristic), capped at 10 parent levels and never crossing `$HOME`. Closes #2623.
 - **Shell hooks falsely flagged as stale on every session** — `gsd-phase-boundary.sh`, `gsd-session-state.sh`, and `gsd-validate-commit.sh` now ship with a `# gsd-hook-version: {{GSD_VERSION}}` header; the installer substitutes `{{GSD_VERSION}}` in `.sh` hooks the same way it does for `.js` hooks; and the stale-hook detector in `gsd-check-update.js` now matches bash `#` comment syntax in addition to JS `//` syntax. All three changes are required together — neither the regex fix alone nor the install fix alone is sufficient to resolve the false positive (#2136, #2206, #2209, #2210, #2212)
+
+## [1.38.2] - 2026-04-19
+
+### Fixed
+- **SDK decoupled from build-from-source install** — replaces the fragile `tsc` + `npm install -g ./sdk` dance on user machines with a prebuilt `sdk/dist/` shipped inside the parent `get-shit-done-cc` tarball. The `gsd-sdk` CLI is now a `bin/gsd-sdk.js` shim in the parent package that resolves `sdk/dist/cli.js` and invokes it via `node`, so npm chmods the bin entry from the tarball (not from a secondary local install) and PATH/exec-bit issues cannot occur. Repurposes `installSdkIfNeeded()` in `bin/install.js` to only verify `sdk/dist/cli.js` exists and fix its execute bit (non-fatal); deletes `resolveGsdSdk()`, `detectShellRc()`, `emitSdkFatal()` and the source-build/global-install logic (162 lines removed). `release.yml` now runs `npm run build:sdk` before publish in both rc and finalize jobs, so every published tarball contains fresh SDK dist. `sdk/package.json` `prepublishOnly` is the final safety net (`rm -rf dist && tsc && chmod +x dist/cli.js`). `install-smoke.yml` adds an `smoke-unpacked` variant that installs from the unpacked dir with the exec bit stripped, so this class of regression cannot ship again. Closes #2441 and #2453.
+- **`--sdk` flag semantics changed** — previously forced a rebuild of the SDK from source; now verifies the bundled `sdk/dist/` is resolvable. Users who were invoking `get-shit-done-cc --sdk` as a "force rebuild" no longer need it — the SDK ships prebuilt.
 
 ### Added
 - **`/gsd-ingest-docs` command** — Scan a repo containing mixed ADRs, PRDs, SPECs, and DOCs and bootstrap or merge the full `.planning/` setup from them in a single pass. Parallel classification (`gsd-doc-classifier`), synthesis with precedence rules and cycle detection (`gsd-doc-synthesizer`), three-bucket conflicts report (`INGEST-CONFLICTS.md`: auto-resolved, competing-variants, unresolved-blockers), and hard-block on LOCKED-vs-LOCKED ADR contradictions in both new and merge modes. Supports directory-convention discovery and `--manifest <file>` YAML override with per-doc precedence. v1 caps at 50 docs per invocation; `--resolve interactive` is reserved. Extracts shared conflict-detection contract into `references/doc-conflict-engine.md` which `/gsd-import` now also consumes (#2387)
@@ -2368,7 +2375,8 @@ Technical implementation details for Phase 2 appear in the **Changed** section b
 - YOLO mode for autonomous execution
 - Interactive mode with checkpoints
 
-[Unreleased]: https://github.com/gsd-build/get-shit-done/compare/v1.37.1...HEAD
+[Unreleased]: https://github.com/gsd-build/get-shit-done/compare/v1.38.2...HEAD
+[1.38.2]: https://github.com/gsd-build/get-shit-done/compare/v1.37.1...v1.38.2
 [1.37.1]: https://github.com/gsd-build/get-shit-done/compare/v1.37.0...v1.37.1
 [1.37.0]: https://github.com/gsd-build/get-shit-done/compare/v1.36.0...v1.37.0
 [1.36.0]: https://github.com/gsd-build/get-shit-done/releases/tag/v1.36.0

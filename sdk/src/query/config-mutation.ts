@@ -63,7 +63,8 @@ const VALID_CONFIG_KEYS = new Set([
   'workflow.research_before_questions',
   'workflow.discuss_mode',
   'workflow.skip_discuss',
-  'workflow._auto_chain_active',
+  'workflow.ui_review',
+  'workflow.max_discuss_passes',
   'workflow.use_worktrees',
   'workflow.code_review',
   'workflow.code_review_depth',
@@ -71,7 +72,9 @@ const VALID_CONFIG_KEYS = new Set([
   'git.milestone_branch_template', 'git.quick_branch_template',
   'planning.commit_docs', 'planning.search_gitignored',
   'workflow.subagent_timeout',
+  'workflow.context_coverage_gate',
   'hooks.context_warnings',
+  'hooks.workflow_guard',
   'features.thinking_partner',
   'features.global_learnings',
   'learnings.max_inject',
@@ -215,7 +218,7 @@ function setConfigValue(obj: Record<string, unknown>, dotPath: string, value: un
  * @returns QueryResult matching gsd-tools `config-set` JSON: `{ updated, key, value, previousValue }`
  * @throws GSDError with Validation if key is invalid or args missing
  */
-export const configSet: QueryHandler = async (args, projectDir) => {
+export const configSet: QueryHandler = async (args, projectDir, _workstream) => {
   const keyPath = args[0];
   const rawValue = args[1];
   if (!keyPath) {
@@ -284,7 +287,7 @@ export const configSet: QueryHandler = async (args, projectDir) => {
  * @returns QueryResult with { set: true, profile, agents }
  * @throws GSDError with Validation if profile is invalid
  */
-export const configSetModelProfile: QueryHandler = async (args, projectDir) => {
+export const configSetModelProfile: QueryHandler = async (args, projectDir, _workstream) => {
   const profileName = args[0];
   if (!profileName) {
     throw new GSDError(
@@ -346,7 +349,7 @@ export const configSetModelProfile: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { created: true, path } or { created: false, reason }
  */
-export const configNewProject: QueryHandler = async (args, projectDir) => {
+export const configNewProject: QueryHandler = async (args, projectDir, _workstream) => {
   const paths = planningPaths(projectDir);
 
   // Idempotent: don't overwrite existing config
@@ -472,7 +475,7 @@ export const configNewProject: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { ensured: true, section }
  */
-export const configEnsureSection: QueryHandler = async (args, projectDir) => {
+export const configEnsureSection: QueryHandler = async (args, projectDir, _workstream) => {
   const sectionName = args[0];
   if (!sectionName) {
     throw new GSDError('Usage: config-ensure-section <section>', ErrorClassification.Validation);

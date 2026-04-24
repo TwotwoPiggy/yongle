@@ -126,13 +126,13 @@ If `$VALIDATE_MODE` only:
 
 ```bash
 if ! command -v gsd-sdk &>/dev/null; then
-  echo "⚠ gsd-sdk not found in PATH — /gsd-quick requires it."
+  echo "⚠ gsd-sdk not found in PATH — /gsd:quick requires it."
   echo ""
   echo "Install the GSD SDK:"
   echo "  npm install -g @gsd-build/sdk"
   echo ""
   echo "Or update GSD to get the latest packages:"
-  echo "  /gsd-update"
+  echo "  /gsd:update"
   exit 1
 fi
 ```
@@ -142,7 +142,7 @@ INIT=$(gsd-sdk query init.quick "$DESCRIPTION")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS_PLANNER=$(gsd-sdk query agent-skills gsd-planner 2>/dev/null)
 AGENT_SKILLS_EXECUTOR=$(gsd-sdk query agent-skills gsd-executor 2>/dev/null)
-AGENT_SKILLS_CHECKER=$(gsd-sdk query agent-skills gsd-checker 2>/dev/null)
+AGENT_SKILLS_CHECKER=$(gsd-sdk query agent-skills gsd-plan-checker 2>/dev/null)
 AGENT_SKILLS_VERIFIER=$(gsd-sdk query agent-skills gsd-verifier 2>/dev/null)
 ```
 
@@ -161,7 +161,7 @@ if [ -f .gitmodules ]; then
 fi
 ```
 
-**If `roadmap_exists` is false:** Error — Quick mode requires an active project with ROADMAP.md. Run `/gsd-new-project` first.
+**If `roadmap_exists` is false:** Error — Quick mode requires an active project with ROADMAP.md. Run `/gsd:new-project` first.
 
 Quick tasks can run mid-phase - validation only checks ROADMAP.md exists, not phase status.
 
@@ -892,6 +892,7 @@ Build file list:
 - If `$DISCUSS_MODE` and context file exists: `${QUICK_DIR}/${quick_id}-CONTEXT.md`
 - If `$RESEARCH_MODE` and research file exists: `${QUICK_DIR}/${quick_id}-RESEARCH.md`
 - If `$VALIDATE_MODE` and verification file exists: `${QUICK_DIR}/${quick_id}-VERIFICATION.md`
+- If `${QUICK_DIR}/${quick_id}-deferred-items.md` exists: `${QUICK_DIR}/${quick_id}-deferred-items.md`
 
 ```bash
 # Explicitly stage all artifacts before commit — PLAN.md may be untracked
@@ -929,7 +930,7 @@ Commit: ${commit_hash}
 
 ---
 
-Ready for next task: /gsd-quick ${GSD_WS}
+Ready for next task: /gsd:quick ${GSD_WS}
 ```
 
 **If NOT `$VALIDATE_MODE`:**
@@ -946,7 +947,7 @@ Commit: ${commit_hash}
 
 ---
 
-Ready for next task: /gsd-quick ${GSD_WS}
+Ready for next task: /gsd:quick ${GSD_WS}
 ```
 
 </process>
