@@ -1,3 +1,8 @@
+// allow-test-rule: pending-migration-to-typed-ir [#2974]
+// Tracked in #2974 for migration to typed-IR assertions per CONTRIBUTING.md
+// "Prohibited: Raw Text Matching on Test Outputs". Per-file review may
+// reclassify some entries as source-text-is-the-product during migration.
+
 /**
  * /gsd-ultraplan-phase [BETA] Tests
  *
@@ -81,13 +86,20 @@ describe('ultraplan-phase workflow beta marker', () => {
 describe('ultraplan-phase workflow runtime gate', () => {
   const content = fs.readFileSync(WF_PATH, 'utf-8');
 
-  test('checks CLAUDE_CODE_VERSION to detect Claude Code runtime', () => {
-    assert.ok(content.includes('CLAUDE_CODE_VERSION'), 'workflow must gate on CLAUDE_CODE_VERSION env var');
+  test('checks Claude Code runtime markers instead of version env var', () => {
+    assert.ok(
+      content.includes('CLAUDECODE') || content.includes('CLAUDE_CODE_ENTRYPOINT'),
+      'workflow must gate on Claude Code runtime marker env vars'
+    );
+    assert.ok(
+      !content.includes('CLAUDE_CODE_VERSION'),
+      'workflow must not gate on CLAUDE_CODE_VERSION'
+    );
   });
 
   test('error message references /gsd-plan-phase as local alternative', () => {
     assert.ok(
-      content.includes('gsd-plan-phase'),
+      content.includes('gsd:plan-phase') || content.includes('gsd-plan-phase'),
       'error message should direct users to /gsd-plan-phase as the local alternative'
     );
   });
@@ -104,7 +116,7 @@ describe('ultraplan-phase workflow initialization', () => {
 
   test('handles missing .planning directory', () => {
     assert.ok(
-      content.includes('gsd-new-project') || content.includes('/gsd-new-project'),
+      content.includes('gsd-new-project') || content.includes('/gsd-new-project') || content.includes('gsd:new-project'),
       'workflow should direct user to /gsd-new-project when .planning is missing'
     );
   });
@@ -154,7 +166,7 @@ describe('ultraplan-phase workflow return path', () => {
   });
 
   test('directs user to run /gsd-import --from after ultraplan completes', () => {
-    assert.ok(content.includes('gsd-import'), 'workflow must direct user to run /gsd-import --from with the saved file path');
+    assert.ok(content.includes('gsd-import') || content.includes('gsd:import'), 'workflow must direct user to run /gsd:import --from with the saved file path');
   });
 
   test('mentions the --from flag for gsd-import', () => {

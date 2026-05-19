@@ -26,7 +26,6 @@ function workflowBool(v: unknown, defaultVal: boolean): boolean {
 export const checkConfigGates: QueryHandler = async (args, projectDir) => {
   const config = await loadConfig(projectDir);
   const wf: Record<string, unknown> = {
-    ...CONFIG_DEFAULTS.workflow,
     ...(config.workflow as unknown as Record<string, unknown>),
   };
   const root = config as Record<string, unknown>;
@@ -63,6 +62,7 @@ export const checkConfigGates: QueryHandler = async (args, projectDir) => {
     verifier: workflowBool(wf.verifier, true),
     plan_check: workflowBool(planCheckFlag, true),
     subagent_timeout: wf.subagent_timeout ?? CONFIG_DEFAULTS.workflow.subagent_timeout,
+    context_coverage_gate: workflowBool(wf.context_coverage_gate, true),
   };
 
   return { data };

@@ -8,19 +8,46 @@
  */
 
 import { findPhase } from './phase.js';
-import { readModifyWriteRoadmapMd, replaceInCurrentMilestone } from './phase-lifecycle.js';
+import { readModifyWriteRoadmapMd, replaceInCurrentMilestone } from './phase-roadmap-mutation.js';
 import { existsSync } from 'node:fs';
 import { escapeRegex, planningPaths } from './helpers.js';
 import { GSDError, ErrorClassification } from '../errors.js';
 import type { QueryHandler } from './utils.js';
 
-export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) => {
-  const phaseNum = args[0];
+function phaseMarkdownRegexSource(phaseNum: string): string {
+  const stripped = String(phaseNum).replace(/^[A-Z]{1,6}-(?=\d)/i, '');
+  const match = stripped.match(/^0*(\d+)([A-Z])?((?:\.\d+)*)$/i);
+  if (!match) return escapeRegex(phaseNum);
+
+  const integer = match[1]!.replace(/^0+/, '') || '0';
+  const letter = match[2] ? escapeRegex(match[2]) : '';
+  const decimal = match[3] ? escapeRegex(match[3]) : '';
+  return `0*${escapeRegex(integer)}${letter}${decimal}`;
+}
+
+export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir, workstream) => {
+  // Support --phase <N> flag form in addition to positional (fixes #2796).
+  // execute-phase.md:228 passes --phase so positional-only parsing silently
+  // took the literal string "--phase" as the phase value.
+  const phaseIdx = args.indexOf('--phase');
+  let phaseNum: string;
+  const phaseFlagValue = phaseIdx !== -1 ? args[phaseIdx + 1] : undefined;
+  if (
+    phaseIdx !== -1 &&
+    phaseFlagValue !== undefined &&
+    !String(phaseFlagValue).startsWith('--')
+  ) {
+    phaseNum = String(phaseFlagValue);
+  } else {
+    // Positional: skip any leading flag tokens in case of mixed invocations.
+    const positional = args.filter((a) => !String(a).startsWith('--'));
+    phaseNum = positional[0] ? String(positional[0]) : '';
+  }
   if (!phaseNum) {
     throw new GSDError('phase number required for roadmap update-plan-progress', ErrorClassification.Validation);
   }
 
-  const phaseResult = await findPhase([phaseNum], projectDir);
+  const phaseResult = await findPhase([phaseNum], projectDir, workstream);
   const info = phaseResult.data as {
     found: boolean;
     plans: string[];
@@ -49,7 +76,7 @@ export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) 
   const status = isComplete ? 'Complete' : summaryCount > 0 ? 'In Progress' : 'Planned';
   const today = new Date().toISOString().split('T')[0]!;
 
-  const roadmapPath = planningPaths(projectDir).roadmap;
+  const roadmapPath = planningPaths(projectDir, workstream).roadmap;
   if (!existsSync(roadmapPath)) {
     return {
       data: {
@@ -62,10 +89,10 @@ export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) 
   }
 
   await readModifyWriteRoadmapMd(projectDir, (roadmapContent) => {
-    const phaseEscaped = escapeRegex(phaseNum);
+    const phasePattern = phaseMarkdownRegexSource(phaseNum);
 
     const tableRowPattern = new RegExp(
-      `^(\\|\\s*${phaseEscaped}\\.?\\s[^|]*(?:\\|[^\\n]*))$`,
+      `^(\\|\\s*${phasePattern}\\.?\\s[^|]*(?:\\|[^\\n]*))$`,
       'im',
     );
     const dateField = isComplete ? ` ${today} ` : '  ';
@@ -84,7 +111,7 @@ export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) 
     });
 
     const planCountPattern = new RegExp(
-      `(#{2,4}\\s*Phase\\s+${phaseEscaped}[\\s\\S]*?\\*\\*Plans:\\*\\*\\s*)[^\\n]+`,
+      `(#{2,4}\\s*Phase\\s+${phasePattern}(?=[:\\s])(?:(?!\\n#{2,4})[\\s\\S])*?\\*\\*Plans:\\*\\*[ \\t]*)[^\\n]+`,
       'i',
     );
     const planCountText = isComplete
@@ -94,7 +121,7 @@ export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) 
 
     if (isComplete) {
       const checkboxPattern = new RegExp(
-        `(-\\s*\\[)[ ](\\]\\s*.*Phase\\s+${phaseEscaped}[:\\s][^\\n]*)`,
+        `(-\\s*\\[)[ ](\\]\\s*.*Phase\\s+${phasePattern}[:\\s][^\\n]*)`,
         'i',
       );
       roadmapContent = replaceInCurrentMilestone(
@@ -117,7 +144,7 @@ export const roadmapUpdatePlanProgress: QueryHandler = async (args, projectDir) 
     }
 
     return roadmapContent;
-  });
+  }, workstream);
 
   return {
     data: {

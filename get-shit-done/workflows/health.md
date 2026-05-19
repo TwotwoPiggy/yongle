@@ -11,18 +11,53 @@ Read all files referenced by the invoking prompt's execution_context before star
 <step name="parse_args">
 **Parse arguments:**
 
-Check if `--repair` or `--backfill` flags are present in the command arguments.
+Check if `--repair`, `--backfill`, or `--context` flags are present in the command arguments.
 
 ```
 REPAIR_FLAG=""
 BACKFILL_FLAG=""
+CONTEXT_MODE=""
 if arguments contain "--repair"; then
   REPAIR_FLAG="--repair"
 fi
 if arguments contain "--backfill"; then
   BACKFILL_FLAG="--backfill"
 fi
+if arguments contain "--context"; then
+  CONTEXT_MODE="true"
+fi
 ```
+
+If `CONTEXT_MODE` is set, jump to the `context_check` step and skip the
+integrity validation steps. The two modes are orthogonal — context utilization
+has nothing to do with `.planning/` directory health.
+</step>
+
+<step name="context_check">
+**Run only when `--context` is set.**
+
+The model running this workflow self-reports the current session's
+approximate `tokensUsed` and the active model's `contextWindow`. Use the values
+visible in your runtime (Claude Code's `/context` slash command output, or the
+model's own session telemetry). If the runtime exposes neither, prompt the user
+once via AskUserQuestion for both numbers.
+
+**TEXT_MODE fallback:** when `text_mode` is true (config or `--text` flag) the
+runtime is non-Claude (Codex, Gemini, etc.) and `AskUserQuestion` is not
+available — replace the prompt with a plain-text two-question sequence
+("Approximate tokens used? Context window size?") and read the answers as
+plain text from the user's response.
+
+```bash
+gsd-sdk query validate.context \
+  --tokens-used "$TOKENS_USED" \
+  --context-window "$CONTEXT_WINDOW"
+```
+
+The query prints a one-line status (`Context utilization: NN% (state)`) plus
+a recommendation line for the warning and critical states. Print the SDK
+output verbatim and end the workflow — do **not** mix in `.planning/`
+health output, the two modes are independent diagnostics.
 </step>
 
 <step name="run_health_check">
@@ -66,10 +101,10 @@ Errors: N | Warnings: N | Info: N
 ## Errors
 
 - [E001] config.json: JSON parse error at line 5
-  Fix: Run /gsd-health --repair to reset to defaults
+  Fix: Run /gsd:health --repair to reset to defaults
 
 - [E002] PROJECT.md not found
-  Fix: Run /gsd-new-project to create
+  Fix: Run /gsd:new-project to create
 ```
 
 **If warnings exist:**
@@ -94,7 +129,7 @@ Errors: N | Warnings: N | Info: N
 **Footer (if repairable issues exist and --repair was NOT used):**
 ```
 ---
-N issues can be auto-repaired. Run: /gsd-health --repair
+N issues can be auto-repaired. Run: /gsd:health --repair
 ```
 </step>
 
@@ -104,7 +139,7 @@ N issues can be auto-repaired. Run: /gsd-health --repair
 Ask user if they want to run repairs:
 
 ```
-Would you like to run /gsd-health --repair to fix N issues automatically?
+Would you like to run /gsd:health --repair to fix N issues automatically?
 ```
 
 If yes, re-run with --repair flag and display results.

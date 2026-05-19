@@ -1,5 +1,9 @@
 'use strict';
 
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * Tests for ROADMAP wave dependency surfacing (#2447).
  */
@@ -192,6 +196,25 @@ Plans:
     assert.ok(result.success);
     const out = JSON.parse(result.output);
     assert.strictEqual(out.updated, false);
+  });
+
+  test('#2757: truths containing colons do not crash annotate-dependencies', () => {
+    // Unquoted truths with colons (Rails idioms: db:seed, /foo/:id, Class::Method)
+    // caused parseMustHavesBlock to return {} instead of a string, then t.trim() threw.
+    const colonTruths = [
+      'GET /foo/:id resolves to controller#show',
+      'Class::Method is idempotent',
+      '"Quoted truth with colon: inside"',
+    ];
+    tmpDir = makePlanProject({
+      '.planning/ROADMAP.md': `# Roadmap\n\n### Phase 1: Foundation\n**Goal:** Set up project\n**Plans:** 1 plan\n\nPlans:\n- [ ] 01-01-PLAN.md — Repro plan\n`,
+      '.planning/phases/01-foundation/01-01-PLAN.md': PLAN_TEMPLATE(1, colonTruths),
+    });
+
+    const result = runGsdTools('roadmap annotate-dependencies 1', tmpDir);
+    assert.ok(result.success, `Command threw on colon-containing truths: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.ok(typeof out.updated === 'boolean', 'should return a valid result object');
   });
 
   test('plan-phase.md documents annotate-dependencies step', () => {

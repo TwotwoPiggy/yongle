@@ -1,5 +1,9 @@
 'use strict';
 
+// allow-test-rule: source-text-is-the-product
+// Reads .md/.json/.yml product files whose deployed text IS what the
+// runtime loads — testing text content tests the deployed contract.
+
 /**
  * Asserts every exact-match key in config-schema.cjs appears at least once
  * in docs/CONFIGURATION.md. A key present in the validator but absent from
@@ -19,8 +23,8 @@ const ROOT = path.resolve(__dirname, '..');
 const { VALID_CONFIG_KEYS } = require('../get-shit-done/bin/lib/config-schema.cjs');
 const CONFIGURATION_MD = fs.readFileSync(path.join(ROOT, 'docs', 'CONFIGURATION.md'), 'utf8');
 
-// Keys starting with _ are internal runtime state, not user-facing config.
-const INTERNAL_KEYS = new Set(['workflow._auto_chain_active']);
+// Reserved for future internal keys; workflow._auto_chain_active removed from VALID_CONFIG_KEYS (#2530).
+const INTERNAL_KEYS = new Set();
 
 test('every key in VALID_CONFIG_KEYS is documented in docs/CONFIGURATION.md', () => {
   const undocumented = [];

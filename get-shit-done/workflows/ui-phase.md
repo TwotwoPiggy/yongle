@@ -21,8 +21,8 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 ```bash
 INIT=$(gsd-sdk query init.plan-phase "$PHASE")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
-AGENT_SKILLS_UI=$(gsd-sdk query agent-skills gsd-ui-researcher 2>/dev/null)
-AGENT_SKILLS_UI_CHECKER=$(gsd-sdk query agent-skills gsd-ui-checker 2>/dev/null)
+AGENT_SKILLS_UI=$(gsd-sdk query agent-skills gsd-ui-researcher)
+AGENT_SKILLS_UI_CHECKER=$(gsd-sdk query agent-skills gsd-ui-checker)
 ```
 
 Parse JSON for: `phase_dir`, `phase_number`, `phase_name`, `phase_slug`, `padded_phase`, `has_context`, `has_research`, `commit_docs`.
@@ -31,7 +31,7 @@ Parse JSON for: `phase_dir`, `phase_number`, `phase_name`, `phase_slug`, `padded
 
 Detect sketch findings:
 ```bash
-SKETCH_FINDINGS_PATH=$(ls ./.claude/skills/sketch-findings-*/SKILL.md 2>/dev/null | head -1)
+SKETCH_FINDINGS_PATH=$(ls ./.claude/skills/sketch-findings-*/SKILL.md 2>/dev/null | head -1 || true)
 ```
 
 Resolve UI agent models:
@@ -49,11 +49,11 @@ UI_ENABLED=$(gsd-sdk query config-get workflow.ui_phase 2>/dev/null || echo "tru
 
 **If `UI_ENABLED` is `false`:**
 ```
-UI phase is disabled in config. Enable via /gsd-settings.
+UI phase is disabled in config. Enable via /gsd:settings.
 ```
 Exit workflow.
 
-**If `planning_exists` is false:** Error — run `/gsd-new-project` first.
+**If `planning_exists` is false:** Error — run `/gsd:new-project` first.
 
 ## 2. Parse and Validate Phase
 
@@ -70,7 +70,7 @@ PHASE_INFO=$(gsd-sdk query roadmap.get-phase "${PHASE}")
 **If `has_context` is false:**
 ```
 No CONTEXT.md found for Phase {N}.
-Recommended: run /gsd-discuss-phase {N} first to capture design preferences.
+Recommended: run /gsd:discuss-phase {N} first to capture design preferences.
 Continuing without user decisions — UI researcher will ask all questions.
 ```
 Continue (non-blocking).
@@ -85,7 +85,7 @@ Continue (non-blocking).
 **If `SKETCH_FINDINGS_PATH` is not empty:**
 ```
 ⚡ Sketch findings detected: {SKETCH_FINDINGS_PATH}
-   Validated design decisions from /gsd-sketch will be loaded into the UI researcher.
+   Validated design decisions from /gsd:sketch will be loaded into the UI researcher.
    Pre-validated decisions (layout, palette, typography, spacing) should be treated as locked — not re-asked.
 ```
 
@@ -134,9 +134,9 @@ Answer: "What visual and interaction contracts does this phase need?"
 - {state_path} (Project State)
 - {roadmap_path} (Roadmap)
 - {requirements_path} (Requirements)
-- {context_path} (USER DECISIONS from /gsd-discuss-phase)
+- {context_path} (USER DECISIONS from /gsd:discuss-phase)
 - {research_path} (Technical Research — stack decisions)
-- {SKETCH_FINDINGS_PATH} (Sketch Findings — validated design decisions, CSS patterns, visual direction from /gsd-sketch, if exists)
+- {SKETCH_FINDINGS_PATH} (Sketch Findings — validated design decisions, CSS patterns, visual direction from /gsd:sketch, if exists)
 </files_to_read>
 
 ${AGENT_SKILLS_UI}
@@ -156,13 +156,15 @@ padded_phase: {padded_phase}
 Omit null file paths from `<files_to_read>`.
 
 ```
-Task(
+Agent(
   prompt=ui_research_prompt,
   subagent_type="gsd-ui-researcher",
   model="{UI_RESEARCHER_MODEL}",
   description="UI Design Contract Phase {N}"
 )
 ```
+
+> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
 ## 6. Handle Researcher Return
 
@@ -207,13 +209,15 @@ ui_safety_gate: {ui_safety_gate config value}
 ```
 
 ```
-Task(
+Agent(
   prompt=ui_checker_prompt,
   subagent_type="gsd-ui-checker",
   model="{UI_CHECKER_MODEL}",
   description="Verify UI-SPEC Phase {N}"
 )
 ```
+
+> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
 
 ## 8. Handle Checker Return
 
@@ -253,7 +257,7 @@ Max revision iterations reached. Remaining issues:
 
 Options:
 1. Force approve — proceed with current UI-SPEC (FLAGs become accepted)
-2. Edit manually — open UI-SPEC.md in editor, re-run /gsd-ui-phase
+2. Edit manually — open UI-SPEC.md in editor, re-run /gsd:ui-phase
 3. Abandon — exit without approving
 ```
 
@@ -279,14 +283,14 @@ Dimensions: 6/6 passed
 {If CONTEXT.md exists for this phase:}
 **Plan Phase {N}** — planner will use UI-SPEC.md as design context
 
-`/clear` then: `/gsd-plan-phase {N}`
+`/clear` then: `/gsd:plan-phase {N}`
 
 {If CONTEXT.md does NOT exist:}
 **Discuss Phase {N}** — gather implementation context before planning
 
-`/clear` then: `/gsd-discuss-phase {N}`
+`/clear` then: `/gsd:discuss-phase {N}`
 
-(or `/gsd-plan-phase {N}` to skip discussion)
+(or `/gsd:plan-phase {N}` to skip discussion)
 
 ───────────────────────────────────────────────────────────────
 ```
@@ -294,7 +298,7 @@ Dimensions: 6/6 passed
 ## 11. Commit (if configured)
 
 ```bash
-gsd-sdk query commit "docs(${padded_phase}): UI design contract" "${PHASE_DIR}/${PADDED_PHASE}-UI-SPEC.md"
+gsd-sdk query commit "docs(${padded_phase}): UI design contract" --files "${PHASE_DIR}/${PADDED_PHASE}-UI-SPEC.md"
 ```
 
 ## 12. Update State

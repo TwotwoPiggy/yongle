@@ -35,6 +35,10 @@ import { PhaseRunner } from './phase-runner.js';
 import { ContextEngine } from './context-engine.js';
 import { PromptFactory } from './phase-prompt.js';
 
+export { PlanningJournal } from './planning-journal.js';
+export type { PlanningEvent, PlanningEventActor, PlanningJournalAppendInput } from './planning-journal.js';
+export { PlanningRuntime } from './planning-runtime.js';
+
 // ─── GSD class ───────────────────────────────────────────────────────────────
 
 export class GSD {
@@ -46,6 +50,8 @@ export class GSD {
   private readonly defaultMaxTurns: number;
   private readonly autoMode: boolean;
   private readonly workstream?: string;
+  private readonly strictSdk?: boolean;
+  private readonly allowFallbackToSubprocess?: boolean;
   readonly eventStream: GSDEventStream;
 
   constructor(options: GSDOptions) {
@@ -58,6 +64,8 @@ export class GSD {
     this.defaultMaxTurns = options.maxTurns ?? 50;
     this.autoMode = options.autoMode ?? false;
     this.workstream = options.workstream;
+    this.strictSdk = options.strictSdk;
+    this.allowFallbackToSubprocess = options.allowFallbackToSubprocess;
     this.eventStream = new GSDEventStream();
   }
 
@@ -124,6 +132,16 @@ export class GSD {
       workstream: this.workstream,
       eventStream: this.eventStream,
       sessionId: this.sessionId,
+      strictSdk: this.strictSdk,
+      allowFallbackToSubprocess: this.allowFallbackToSubprocess,
+      onDispatchEvent: (event) => {
+        this.eventStream.emitEvent({
+          type: GSDEventType.StreamEvent,
+          timestamp: new Date().toISOString(),
+          sessionId: this.sessionId ?? '',
+          event,
+        });
+      },
     });
   }
 
@@ -139,7 +157,7 @@ export class GSD {
    */
   async runPhase(phaseNumber: string, options?: PhaseRunnerOptions): Promise<PhaseRunnerResult> {
     const tools = this.createTools();
-    const promptFactory = new PromptFactory();
+    const promptFactory = new PromptFactory({ projectDir: this.projectDir });
     const contextEngine = new ContextEngine(this.projectDir, undefined, undefined, this.workstream);
     const config = await loadConfig(this.projectDir, this.workstream);
 
@@ -296,6 +314,7 @@ export type { GSDConfig } from './config.js';
 export { GSDTools, GSDToolsError, resolveGsdToolsPath } from './gsd-tools.js';
 export { runPlanSession, runPhaseStepSession } from './session-runner.js';
 export { buildExecutorPrompt, parseAgentTools } from './prompt-builder.js';
+export type { ExecutorPromptOptions } from './prompt-builder.js';
 export * from './types.js';
 
 // S02: Event stream, context, prompt, and logging modules

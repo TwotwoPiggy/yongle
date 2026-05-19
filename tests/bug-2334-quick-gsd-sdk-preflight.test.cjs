@@ -19,6 +19,9 @@ const path = require('path');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', 'get-shit-done', 'workflows', 'quick.md');
 
+// allow-test-rule: source-text-is-the-product
+// quick.md is the AI instruction workflow — the `command -v gsd-sdk` guard IS the fix.
+// There is no behavioral equivalent: the check runs inside the AI agent, not in gsd-tools.
 describe('bug #2334: quick workflow gsd-sdk pre-flight check', () => {
   let content;
 
@@ -53,10 +56,10 @@ describe('bug #2334: quick workflow gsd-sdk pre-flight check', () => {
     const firstSdkCall = content.indexOf('gsd-sdk query init.quick', step2Start);
     const step2Section = content.slice(step2Start, firstSdkCall);
 
-    const hasInstallHint = step2Section.includes('@gsd-build/sdk') || step2Section.includes('gsd-update') || step2Section.includes('/gsd-update');
+    const hasInstallHint = step2Section.includes('get-shit-done-cc') || step2Section.includes('gsd-update') || step2Section.includes('/gsd-update');
     assert.ok(
       hasInstallHint,
-      'Pre-flight error must include a hint on how to install gsd-sdk (npm install -g @gsd-build/sdk or /gsd-update)'
+      'Pre-flight error must include a hint on how to install query-capable gsd-sdk (npm install -g get-shit-done-cc or /gsd-update)'
     );
   });
 });

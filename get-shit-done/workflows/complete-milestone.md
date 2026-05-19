@@ -41,7 +41,7 @@ When a milestone completes:
 Before proceeding with milestone close, run the comprehensive open artifact audit.
 
 ```bash
-gsd-sdk query audit-open 2>/dev/null
+gsd-sdk query audit-open
 ```
 
 If the output contains open items (any section with count > 0):
@@ -51,7 +51,7 @@ Display the full audit report to the user.
 Then ask:
 ```
 These items are open. Choose an action:
-[R] Resolve — stop and fix items, then re-run /gsd-complete-milestone
+[R] Resolve — stop and fix items, then re-run /gsd:complete-milestone
 [A] Acknowledge all — document as deferred and proceed with close
 [C] Cancel — exit without closing
 ```
@@ -124,7 +124,7 @@ Requirements: {N}/{M} v1 requirements checked off
 
 MUST present 3 options:
 1. **Proceed anyway** — mark milestone complete with known gaps
-2. **Run audit first** — `/gsd-audit-milestone` to assess gap severity
+2. **Run audit first** — `/gsd:audit-milestone` to assess gap severity
 3. **Abort** — return to development
 
 If user selects "Proceed anyway": note incomplete requirements in MILESTONES.md under `### Known Gaps` with REQ-IDs and descriptions.
@@ -441,7 +441,7 @@ mv .planning/phases/{phase-dir} .planning/milestones/v[X.Y]-phases/
 ```
 Verify: `✅ Phase directories archived to .planning/milestones/v[X.Y]-phases/`
 
-If "Skip": Phase directories remain in `.planning/phases/` as raw execution history. Use `/gsd-cleanup` later to archive retroactively.
+If "Skip": Phase directories remain in `.planning/phases/` as raw execution history. Use `/gsd:cleanup` later to archive retroactively.
 
 After archival, the AI still handles:
 - Reorganizing ROADMAP.md with milestone grouping (requires judgment) — overwrite in place after extracting Backlog section
@@ -494,7 +494,7 @@ Append the extracted Backlog content verbatim to the end of the newly written RO
 **Safety commit — commit archive files BEFORE deleting any originals:**
 
 ```bash
-gsd-sdk query commit "chore: archive v[X.Y] milestone files" .planning/milestones/v[X.Y]-ROADMAP.md .planning/milestones/v[X.Y]-REQUIREMENTS.md .planning/milestones/v[X.Y]-MILESTONE-AUDIT.md .planning/MILESTONES.md .planning/PROJECT.md .planning/STATE.md .planning/ROADMAP.md
+gsd-sdk query commit "chore: archive v[X.Y] milestone files" --files .planning/milestones/v[X.Y]-ROADMAP.md .planning/milestones/v[X.Y]-REQUIREMENTS.md .planning/milestones/v[X.Y]-MILESTONE-AUDIT.md .planning/MILESTONES.md .planning/PROJECT.md .planning/STATE.md .planning/ROADMAP.md
 ```
 
 This creates a durable checkpoint in git history. If anything fails after this point, the working tree can be reconstructed from git.
@@ -563,7 +563,7 @@ If the "## Cross-Milestone Trends" section exists, update the tables with new da
 
 **Commit:**
 ```bash
-gsd-sdk query commit "docs: update retrospective for v${VERSION}" .planning/RETROSPECTIVE.md
+gsd-sdk query commit "docs: update retrospective for v${VERSION}" --files .planning/RETROSPECTIVE.md
 ```
 
 </step>
@@ -724,9 +724,16 @@ fi
 
 <step name="git_tag">
 
+<config-check>
+Read `git.create_tag` via `gsd-sdk query config-get git.create_tag 2>/dev/null || echo "true"`.
+If the result is `false` → skip this step entirely and proceed to `git_commit_milestone`.
+</config-check>
+
 Create git tag:
 
 ```bash
+# Pre-check: skip if tag already exists (prevents silent failure on retry)
+if git rev-parse "v[X.Y]" >/dev/null 2>&1; then echo "Tag v[X.Y] already exists, skipping"; exit 0; fi
 git tag -a v[X.Y] -m "v[X.Y] [Name]
 
 Delivered: [One sentence]
@@ -786,7 +793,7 @@ Tag: v[X.Y]
 
 `/clear` then:
 
-`/gsd-new-milestone`
+`/gsd:new-milestone`
 
 ---
 ```
@@ -835,13 +842,13 @@ Milestone completion is successful when:
 - [ ] Safety commit made (archive files + updated ROADMAP.md) BEFORE deleting REQUIREMENTS.md
 - [ ] REQUIREMENTS.md removed via `git rm` (fresh for next milestone, history preserved)
 - [ ] STATE.md updated with fresh project reference
-- [ ] Git tag created (v[X.Y])
+- [ ] Git tag created (v[X.Y]) (if `git.create_tag` enabled)
 - [ ] Milestone commit made (includes archive files and deletion)
 - [ ] Requirements completion checked against REQUIREMENTS.md traceability table
 - [ ] Incomplete requirements surfaced with proceed/audit/abort options
 - [ ] Known gaps recorded in MILESTONES.md if user proceeded with incomplete requirements
 - [ ] RETROSPECTIVE.md updated with milestone section
 - [ ] Cross-milestone trends updated
-- [ ] User knows next step (/gsd-new-milestone)
+- [ ] User knows next step (/gsd:new-milestone)
 
 </success_criteria>

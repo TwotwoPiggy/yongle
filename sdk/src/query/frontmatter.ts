@@ -19,7 +19,7 @@
 import { readFile } from 'node:fs/promises';
 import { GSDError, ErrorClassification } from '../errors.js';
 import type { QueryHandler } from './utils.js';
-import { escapeRegex, resolvePathUnderProject } from './helpers.js';
+import { escapeRegex, resolveFrontmatterPath } from './helpers.js';
 
 // ─── splitInlineArray ───────────────────────────────────────────────────────
 
@@ -174,20 +174,18 @@ export function extractFrontmatterLeading(content: string): Record<string, unkno
  * - Nested objects via indentation
  * - Inline arrays: key: [a, b, c]
  * - Dash arrays with auto-conversion from empty objects
- * - Multiple stacked blocks (uses the LAST match)
  * - CRLF line endings
  * - Quoted value stripping
+ *
+ * Anchored at the start of the file — only the leading `---...---` block is
+ * considered canonical frontmatter. Body `---` separators and embedded YAML
+ * examples inside fenced code blocks are never picked up.
  *
  * @param content - File content potentially containing frontmatter
  * @returns Parsed frontmatter as a record, or empty object if none found
  */
 export function extractFrontmatter(content: string): Record<string, unknown> {
-  // Find ALL frontmatter blocks. Use the LAST one (corruption recovery).
-  const allBlocks = [...content.matchAll(/(?:^|\n)\s*---\r?\n([\s\S]+?)\r?\n---/g)];
-  const match = allBlocks.length > 0 ? allBlocks[allBlocks.length - 1] : null;
-  if (!match) return {};
-
-  return parseFrontmatterYamlLines(match[1]);
+  return extractFrontmatterLeading(content);
 }
 
 // ─── stripFrontmatter ───────────────────────────────────────────────────────
@@ -365,15 +363,10 @@ export const frontmatterGet: QueryHandler = async (args, projectDir) => {
     throw new GSDError('file path contains null bytes', ErrorClassification.Validation);
   }
 
-  let fullPath: string;
-  try {
-    fullPath = await resolvePathUnderProject(projectDir, filePath);
-  } catch (err) {
-    if (err instanceof GSDError) {
-      return { data: { error: err.message, path: filePath } };
-    }
-    throw err;
-  }
+  // CJS parity (frontmatter.cjs:323): no project-root prefix check — accept
+  // any absolute path (and macOS tmpdir paths whose names contain spaces).
+  // Bug #3509.
+  const fullPath = resolveFrontmatterPath(projectDir, filePath);
 
   let content: string;
   try {
@@ -383,7 +376,12 @@ export const frontmatterGet: QueryHandler = async (args, projectDir) => {
   }
 
   const fm = extractFrontmatter(content);
-  const field = args[1];
+  // CLI invocation is `frontmatter get <file> --field <name>`; the CJS router
+  // passes args.slice(2) = [file, '--field', name] to the SDK. Previously the
+  // handler treated args[1] as the field name and saw `'--field'`. Parse the
+  // flag so both invocation shapes work (positional second arg AND --field).
+  const fieldFlagIdx = args.indexOf('--field');
+  const field = fieldFlagIdx >= 0 ? args[fieldFlagIdx + 1] : args[1];
 
   if (field) {
     const value = fm[field];

@@ -17,22 +17,18 @@
  * ```
  */
 
-import { join, dirname, relative, resolve, isAbsolute, normalize } from 'node:path';
+import { join, dirname, relative, resolve, isAbsolute, normalize, sep as pathSep } from 'node:path';
 import { realpath } from 'node:fs/promises';
+import { existsSync, statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { GSDError, ErrorClassification } from '../errors.js';
+export { SUPPORTED_RUNTIMES, type Runtime } from '../model-catalog.js';
+import { SUPPORTED_RUNTIMES, type Runtime } from '../model-catalog.js';
+import { workspacePlanningPaths, resolveWorkspaceContext, type PlanningPaths } from './workspace.js';
+export { stateExtractField } from './state-document.js';
+import { relPlanningPath, validateWorkstreamName } from '../workstream-utils.js';
 
 // ─── Runtime-aware agents directory resolution ─────────────────────────────
-
-/**
- * Supported GSD runtimes. Kept in sync with `bin/install.js:getGlobalDir()`.
- */
-export const SUPPORTED_RUNTIMES = [
-  'claude', 'opencode', 'kilo', 'gemini', 'codex', 'copilot', 'antigravity',
-  'cursor', 'windsurf', 'augment', 'trae', 'qwen', 'codebuddy', 'cline',
-] as const;
-
-export type Runtime = (typeof SUPPORTED_RUNTIMES)[number];
 
 function expandTilde(p: string): string {
   return p.startsWith('~/') || p === '~' ? join(homedir(), p.slice(1)) : p;
@@ -80,6 +76,10 @@ export function getRuntimeConfigDir(runtime: Runtime): string {
       return process.env.CODEBUDDY_CONFIG_DIR ? expandTilde(process.env.CODEBUDDY_CONFIG_DIR) : join(homedir(), '.codebuddy');
     case 'cline':
       return process.env.CLINE_CONFIG_DIR ? expandTilde(process.env.CLINE_CONFIG_DIR) : join(homedir(), '.cline');
+    case 'hermes':
+      return process.env.HERMES_HOME ? expandTilde(process.env.HERMES_HOME) : join(homedir(), '.hermes');
+    default:
+      throw new Error(`Unknown runtime: ${String(runtime)}`);
   }
 }
 
@@ -119,18 +119,63 @@ export function resolveAgentsDir(runtime: Runtime = 'claude'): string {
   return join(getRuntimeConfigDir(runtime), 'agents');
 }
 
+/**
+ * Resolve the runtime-global skills base directory.
+ *
+ * Most runtimes store global skills under `<configDir>/skills`.
+ * `cline` is rules-based and has no global skills directory.
+ */
+export function resolveGlobalSkillsBase(runtime: Runtime): string | null {
+  if (runtime === 'cline') return null;
+  return join(getRuntimeConfigDir(runtime), 'skills');
+}
+
+/**
+ * Render a human-readable runtime-global skills base path.
+ * Uses `~` when the path lives under the current home dir.
+ * Returns a displayable string for unsupported runtimes (never null).
+ */
+export function renderGlobalSkillsBaseDisplayPath(runtime: Runtime): string {
+  const base = resolveGlobalSkillsBase(runtime);
+  if (!base) return `(${runtime} does not use a skills directory)`;
+  const home = homedir();
+  const homeWithSep = home.endsWith(pathSep) ? home : `${home}${pathSep}`;
+  return (base === home || base.startsWith(homeWithSep)) ? `~${base.slice(home.length)}` : base;
+}
+
+/** Resolve one runtime-global skill directory, or `null` when unsupported. */
+export function resolveGlobalSkillDir(runtime: Runtime, skillName: string): string | null {
+  const base = resolveGlobalSkillsBase(runtime);
+  if (base === null) return null;
+  const candidate = resolve(base, skillName);
+  const rel = relative(base, candidate);
+  if (!skillName || rel.startsWith('..') || isAbsolute(rel)) return null;
+  return candidate;
+}
+
+/** Resolve the canonical SKILL.md path for one runtime-global skill. */
+export function resolveGlobalSkillMarkdownPath(runtime: Runtime, skillName: string): string | null {
+  const dir = resolveGlobalSkillDir(runtime, skillName);
+  if (dir === null) return null;
+  return join(dir, 'SKILL.md');
+}
+
+/**
+ * Render a human-readable global skill path for warnings.
+ * Uses `~` when the path lives under the current home dir.
+ */
+export function renderGlobalSkillDisplayPath(runtime: Runtime, skillName: string): string {
+  const dir = resolveGlobalSkillDir(runtime, skillName);
+  if (!dir) return `(${runtime} does not use a skills directory)`;
+  const home = homedir();
+  const homeWithSep = home.endsWith(pathSep) ? home : `${home}${pathSep}`;
+  return (dir === home || dir.startsWith(homeWithSep)) ? `~${dir.slice(home.length)}` : dir;
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /** Paths to common .planning files. */
-export interface PlanningPaths {
-  planning: string;
-  state: string;
-  roadmap: string;
-  project: string;
-  config: string;
-  phases: string;
-  requirements: string;
-}
+export type { PlanningPaths } from './workspace.js';
 
 // ─── escapeRegex ────────────────────────────────────────────────────────────
 
@@ -273,29 +318,6 @@ export function toPosixPath(p: string): string {
   return p.split('\\').join('/');
 }
 
-// ─── stateExtractField ──────────────────────────────────────────────────────
-
-/**
- * Extract a field value from STATE.md content.
- *
- * Supports both **bold:** and plain: formats, case-insensitive.
- *
- * @param content - STATE.md content string
- * @param fieldName - Field name to extract
- * @returns The field value, or null if not found
- */
-export function stateExtractField(content: string, fieldName: string): string | null {
-  const escaped = escapeRegex(fieldName);
-  // Horizontal whitespace only after ':' so YAML blocks like `progress:\n  total:` do not
-  // match as `Progress:` with a multi-line "value" (parity with STATE.md body fields).
-  const boldPattern = new RegExp(`\\*\\*${escaped}:\\*\\*[ \\t]*(.+)`, 'i');
-  const boldMatch = content.match(boldPattern);
-  if (boldMatch) return boldMatch[1].trim();
-  const plainPattern = new RegExp(`^${escaped}:[ \\t]*(.+)`, 'im');
-  const plainMatch = content.match(plainPattern);
-  return plainMatch ? plainMatch[1].trim() : null;
-}
-
 // ─── normalizeMd ───────────────────────────────────────────────────────────
 
 /**
@@ -406,14 +428,28 @@ export function normalizeMd(content: string): string {
 /**
  * Get common .planning file paths for a project directory.
  *
- * Simplified version (no workstream/project env vars).
+ * When `workstream` is provided, all paths are rooted under
+ * `.planning/workstreams/<workstream>` instead of `.planning`.
  * All paths returned in POSIX format.
  *
  * @param projectDir - Root project directory
+ * @param workstream - Optional workstream name
  * @returns Object with paths to common .planning files
  */
-export function planningPaths(projectDir: string): PlanningPaths {
-  const base = join(projectDir, '.planning');
+export function planningPaths(projectDir: string, workstream?: string): PlanningPaths {
+  const envCtx = resolveWorkspaceContext();
+  // Validate env workstream before use: invalid GSD_WORKSTREAM falls back to
+  // root .planning/ (bug-2791 contract — invalid env must not crash or route
+  // to a bad path; silent fallback to root preserves pre-#3269 behaviour).
+  const validEnvWorkstream =
+    envCtx.workstream && validateWorkstreamName(envCtx.workstream) ? envCtx.workstream : null;
+  const effectiveWorkstream = workstream ?? validEnvWorkstream;
+  // Use relPlanningPath(workstream) to scope the base path per workstream policy.
+  const base = join(projectDir, relPlanningPath(effectiveWorkstream ?? undefined));
+  // For env-sourced project scoping (no explicit workstream), delegate to workspace.
+  if (!effectiveWorkstream && envCtx.project) {
+    return workspacePlanningPaths(projectDir, { workstream: null, project: envCtx.project });
+  }
   return {
     planning: toPosixPath(base),
     state: toPosixPath(join(base, 'STATE.md')),
@@ -424,6 +460,11 @@ export function planningPaths(projectDir: string): PlanningPaths {
     requirements: toPosixPath(join(base, 'REQUIREMENTS.md')),
   };
 }
+
+// ─── findProjectRoot (multi-repo .planning resolution) ─────────────────────
+// Implementation lives in sdk/src/project-root/index.ts — re-exported here
+// so that existing consumers of helpers.ts continue to work unchanged.
+export { findProjectRoot } from '../project-root/index.js';
 
 // ─── resolvePathUnderProject ───────────────────────────────────────────────
 
@@ -450,6 +491,26 @@ export async function resolvePathUnderProject(projectDir: string, userPath: stri
     throw new GSDError('path escapes project directory', ErrorClassification.Validation);
   }
   return realCandidate;
+}
+
+/**
+ * Resolve a user-supplied file path the way CJS frontmatter handlers do.
+ *
+ * Mirrors `path.isAbsolute(filePath) ? filePath : path.join(cwd, filePath)`
+ * from get-shit-done/bin/lib/frontmatter.cjs (lines 323, 340, 354, 369).
+ * Does NOT enforce the "under project root" prefix check — frontmatter
+ * verbs accept arbitrary absolute paths (the user is naming a file outside
+ * `.planning/`, often a phase-scoped plan in an external location, or a
+ * tmpdir inside `/var/folders` whose path includes spaces).
+ *
+ * Bug #3509 parity: tests on macOS use `os.tmpdir()` directories that
+ * resolve outside the project root; the project-scoped variant was
+ * rejecting them with "path escapes project directory". Use this helper
+ * for the frontmatter family. Use `resolvePathUnderProject` for commands
+ * that must stay inside the project (e.g. template output, decisions).
+ */
+export function resolveFrontmatterPath(projectDir: string, userPath: string): string {
+  return isAbsolute(userPath) ? normalize(userPath) : resolve(projectDir, userPath);
 }
 
 // ─── sanitizeForDisplay (security.cjs) ───────────────────────────────────────

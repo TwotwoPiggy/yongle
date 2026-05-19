@@ -21,6 +21,7 @@
 import { open, unlink, stat, readFile, writeFile, readdir } from 'node:fs/promises';
 import {
   constants, unlinkSync, existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync,
+  realpathSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { GSDError, ErrorClassification } from '../errors.js';
@@ -28,15 +29,17 @@ import { extractFrontmatter, stripFrontmatter } from './frontmatter.js';
 import { reconstructFrontmatter, spliceFrontmatter } from './frontmatter-mutation.js';
 import {
   comparePhaseNum,
-  escapeRegex,
   normalizePhaseName,
   phaseTokenMatches,
   planningPaths,
   normalizeMd,
-  stateExtractField,
 } from './helpers.js';
 import { buildStateFrontmatter, getMilestonePhaseFilter } from './state.js';
+import { scanPhasePlans } from './plan-scan.js';
+import { stateExtractField, stateReplaceField, stateReplaceFieldWithFallback, computeProgressPercent } from './state-document.js';
 import type { QueryHandler } from './utils.js';
+
+const PROGRESS_FRONTMATTER_FIELDS = new Set(['Progress', 'Total Plans in Phase', 'Total Phases']);
 
 // ─── Process exit lock cleanup (D2 — match CJS state.cjs:16-23) ─────────
 
@@ -52,48 +55,7 @@ process.on('exit', () => {
   }
 });
 
-// ─── stateReplaceField ────────────────────────────────────────────────────
-
-/**
- * Replace a field value in STATE.md content.
- *
- * Uses separate regex instances (no g flag) to avoid lastIndex persistence.
- * Supports both **bold:** and plain: formats.
- *
- * @param content - STATE.md content
- * @param fieldName - Field name to replace
- * @param newValue - New value to set
- * @returns Updated content, or null if field not found
- */
-export function stateReplaceField(content: string, fieldName: string, newValue: string): string | null {
-  const escaped = escapeRegex(fieldName);
-  // Try **Field:** bold format first
-  const boldPattern = new RegExp(`(\\*\\*${escaped}:\\*\\*\\s*)(.*)`, 'i');
-  if (boldPattern.test(content)) {
-    return content.replace(new RegExp(`(\\*\\*${escaped}:\\*\\*\\s*)(.*)`, 'i'), (_match, prefix: string) => `${prefix}${newValue}`);
-  }
-  // Try plain Field: format
-  const plainPattern = new RegExp(`(^${escaped}:\\s*)(.*)`, 'im');
-  if (plainPattern.test(content)) {
-    return content.replace(new RegExp(`(^${escaped}:\\s*)(.*)`, 'im'), (_match, prefix: string) => `${prefix}${newValue}`);
-  }
-  return null;
-}
-
-/**
- * Replace a field with fallback field name support.
- *
- * Tries primary first, then fallback. Returns content unchanged if neither matches.
- */
-function stateReplaceFieldWithFallback(content: string, primary: string, fallback: string | null, value: string): string {
-  let result = stateReplaceField(content, primary, value);
-  if (result) return result;
-  if (fallback) {
-    result = stateReplaceField(content, fallback, value);
-    if (result) return result;
-  }
-  return content;
-}
+export { stateReplaceField };
 
 /**
  * Update fields within the ## Current Position section.
@@ -117,7 +79,7 @@ function updateCurrentPositionFields(content: string, fields: Record<string, str
     posBody = posBody.replace(/^Plan:.*$/m, `Plan: ${fields.plan}`);
   }
 
-  return content.replace(posPattern, `${posMatch[1]}${posBody}`);
+  return content.replace(posPattern, () => `${posMatch[1]}${posBody}`);
 }
 
 /** Port of `readTextArgOrFile` from `state.cjs` — inline text or file path under project root. */
@@ -130,14 +92,26 @@ function readTextArgOrFile(
   if (!filePath) {
     return (value ?? '').trim();
   }
-  const root = resolve(projectDir);
-  const resolved = isAbsolute(filePath) ? resolve(filePath) : resolve(root, filePath);
-  const rel = relative(root, resolved);
+  // Resolve symlinks on both the project root and the target path before
+  // comparing — matches CJS `validatePath` in security.cjs. On macOS,
+  // `os.tmpdir()` returns `/var/folders/...` but the realpath is
+  // `/private/var/folders/...`; without realpath normalization, the
+  // `relative()` check sees `/private/var/...` vs `/var/...` as different
+  // tree roots and rejects safe in-project files. Symlink resolution falls
+  // back to logical resolve() when the path doesn't exist yet (e.g., file
+  // about to be created).
+  function realpathOrResolve(p: string): string {
+    try { return realpathSync(p); } catch { return resolve(p); }
+  }
+  const resolvedBase = realpathOrResolve(resolve(projectDir));
+  const targetLogical = isAbsolute(filePath) ? resolve(filePath) : resolve(resolvedBase, filePath);
+  const resolvedTarget = realpathOrResolve(targetLogical);
+  const rel = relative(resolvedBase, resolvedTarget);
   if (rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(`${label} path rejected: outside project directory`);
   }
   try {
-    return readFileSync(resolved, 'utf-8').trimEnd();
+    return readFileSync(resolvedTarget, 'utf-8').trimEnd();
   } catch {
     throw new Error(`${label} file not found: ${filePath}`);
   }
@@ -234,10 +208,15 @@ export async function releaseStateLock(lockPath: string): Promise<void> {
  * Strips existing frontmatter, rebuilds from body + disk, and splices back.
  * Preserves existing status when body-derived status is 'unknown'.
  */
-async function syncStateFrontmatter(content: string, projectDir: string): Promise<string> {
+async function syncStateFrontmatter(
+  content: string,
+  projectDir: string,
+  workstream?: string,
+  options: { preserveExistingProgress?: boolean } = {},
+): Promise<string> {
   const existingFm = extractFrontmatter(content);
   const body = stripFrontmatter(content);
-  const derivedFm = await buildStateFrontmatter(body, projectDir);
+  const derivedFm = await buildStateFrontmatter(body, projectDir, workstream, options);
 
   // Preserve existing status when body-derived is 'unknown'
   if (derivedFm.status === 'unknown' && existingFm.status && existingFm.status !== 'unknown') {
@@ -259,9 +238,12 @@ async function syncStateFrontmatter(content: string, projectDir: string): Promis
  */
 async function readModifyWriteStateMd(
   projectDir: string,
-  modifier: (content: string) => string | Promise<string>
+  modifier: (content: string) => string | Promise<string>,
+  workstream?: string,
+  options: { resync?: boolean; preserveExistingProgress?: boolean } = {},
 ): Promise<string> {
-  const statePath = planningPaths(projectDir).state;
+  const statePath = planningPaths(projectDir, workstream).state;
+  const resync = options.resync !== false;
   const lockPath = await acquireStateLock(statePath);
   try {
     let content: string;
@@ -273,9 +255,18 @@ async function readModifyWriteStateMd(
     // Strip frontmatter before passing to modifier so that regex replacements
     // operate on body fields only (not on YAML frontmatter keys like 'status:').
     // syncStateFrontmatter rebuilds frontmatter from the modified body + disk.
+    const preFm = extractFrontmatter(content);
     const body = stripFrontmatter(content);
     const modified = await modifier(body);
-    const synced = await syncStateFrontmatter(modified, projectDir);
+    let synced = await syncStateFrontmatter(modified, projectDir, workstream, {
+      preserveExistingProgress: options.preserveExistingProgress,
+    });
+    if (!resync && preFm && preFm.progress) {
+      const postFm = extractFrontmatter(synced);
+      postFm.progress = preFm.progress;
+      const yamlStr = reconstructFrontmatter(postFm);
+      synced = `---\n${yamlStr}\n---\n\n${stripFrontmatter(synced)}`;
+    }
     const normalized = normalizeMd(synced);
     await writeFile(statePath, normalized, 'utf-8');
     return normalized;
@@ -292,8 +283,9 @@ async function readModifyWriteStateMd(
 export async function readModifyWriteStateMdFull(
   projectDir: string,
   modifier: (content: string) => string | Promise<string>,
+  workstream?: string,
 ): Promise<void> {
-  const statePath = planningPaths(projectDir).state;
+  const statePath = planningPaths(projectDir, workstream).state;
   const lockPath = await acquireStateLock(statePath);
   try {
     let content = '';
@@ -303,7 +295,7 @@ export async function readModifyWriteStateMdFull(
       /* missing */
     }
     const modified = await modifier(content);
-    const synced = await syncStateFrontmatter(modified, projectDir);
+    const synced = await syncStateFrontmatter(modified, projectDir, workstream);
     await writeFile(statePath, normalizeMd(synced), 'utf-8');
   } finally {
     await releaseStateLock(lockPath);
@@ -319,9 +311,9 @@ export async function readModifyWriteStateMdFull(
  *
  * @param args - args[0]: field name, args[1]: new value
  * @param projectDir - Project root directory
- * @returns QueryResult with { updated: true/false, field, value }
+ * @returns QueryResult with { updated: true/false }
  */
-export const stateUpdate: QueryHandler = async (args, projectDir) => {
+export const stateUpdate: QueryHandler = async (args, projectDir, workstream) => {
   const field = args[0];
   const value = args[1];
 
@@ -329,7 +321,20 @@ export const stateUpdate: QueryHandler = async (args, projectDir) => {
     throw new GSDError('field and value required for state update', ErrorClassification.Validation);
   }
 
+  // Match CJS `cmdStateUpdate` contract: caller receives `{ updated: false,
+  // reason: '...' }` when the operation is a no-op so shell-script consumers
+  // can JSON.parse output and branch on the reason. Without an explicit
+  // STATE.md check up front, readModifyWriteStateMd's auto-create behavior
+  // would mask "STATE.md missing" as a successful no-op write.
+  const statePath = planningPaths(projectDir, workstream).state;
+  try {
+    await readFile(statePath, 'utf-8');
+  } catch {
+    return { data: { updated: false, reason: 'STATE.md not found' } };
+  }
+
   let updated = false;
+  const shouldResync = PROGRESS_FRONTMATTER_FIELDS.has(field);
   await readModifyWriteStateMd(projectDir, (content) => {
     const result = stateReplaceField(content, field, value);
     if (result) {
@@ -337,9 +342,15 @@ export const stateUpdate: QueryHandler = async (args, projectDir) => {
       return result;
     }
     return content;
+  }, workstream, {
+    resync: shouldResync,
+    preserveExistingProgress: !shouldResync,
   });
 
-  return { data: { updated, field, value: updated ? value : undefined } };
+  if (!updated) {
+    return { data: { updated: false, reason: `Field "${field}" not found in STATE.md` } };
+  }
+  return { data: { updated: true } };
 };
 
 /**
@@ -351,7 +362,7 @@ export const stateUpdate: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with `{ updated, failed }` matching `cmdStatePatch` in `state.cjs`
  */
-export const statePatch: QueryHandler = async (args, projectDir) => {
+export const statePatch: QueryHandler = async (args, projectDir, workstream) => {
   let patches: Record<string, string>;
 
   if (args.length >= 2 && args[0]?.startsWith('--')) {
@@ -375,6 +386,7 @@ export const statePatch: QueryHandler = async (args, projectDir) => {
 
   const updated: string[] = [];
   const failed: string[] = [];
+  const shouldResync = Object.keys(patches).some(field => PROGRESS_FRONTMATTER_FIELDS.has(field));
   await readModifyWriteStateMd(projectDir, (content) => {
     for (const [field, value] of Object.entries(patches)) {
       const result = stateReplaceField(content, field, String(value));
@@ -386,6 +398,9 @@ export const statePatch: QueryHandler = async (args, projectDir) => {
       }
     }
     return content;
+  }, workstream, {
+    resync: shouldResync,
+    preserveExistingProgress: !shouldResync,
   });
 
   return { data: { updated, failed } };
@@ -404,7 +419,7 @@ export const statePatch: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with phase metadata and `updated` field names (for raw parity)
  */
-export const stateBeginPhase: QueryHandler = async (args, projectDir) => {
+export const stateBeginPhase: QueryHandler = async (args, projectDir, workstream) => {
   const named = parseNamedArgs(args, ['phase', 'name', 'plans']);
   let phaseNumber = (named.phase as string | null) || '';
   let phaseName = (named.name as string | null) || '';
@@ -522,12 +537,12 @@ export const stateBeginPhase: QueryHandler = async (args, projectDir) => {
         posBody = posBody.replace(/^Last activity:.*$/im, newActivity);
       }
 
-      content = content.replace(positionPattern, `${header}${posBody}`);
+      content = content.replace(positionPattern, () => `${header}${posBody}`);
       updated.push('Current Position');
     }
 
     return content;
-  });
+  }, workstream);
 
   return {
     data: {
@@ -548,7 +563,7 @@ export const stateBeginPhase: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { advanced, current_plan, total_plans }
  */
-export const stateAdvancePlan: QueryHandler = async (_args, projectDir) => {
+export const stateAdvancePlan: QueryHandler = async (_args, projectDir, workstream) => {
   const today = new Date().toISOString().split('T')[0];
   let result: Record<string, unknown> = { error: 'STATE.md not found' };
 
@@ -619,7 +634,7 @@ export const stateAdvancePlan: QueryHandler = async (_args, projectDir) => {
     });
     result = { advanced: true, previous_plan: currentPlan, current_plan: newPlan, total_plans: totalPlans };
     return content;
-  });
+  }, workstream);
 
   return { data: result };
 };
@@ -633,7 +648,7 @@ export const stateAdvancePlan: QueryHandler = async (_args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { recorded: true/false }
  */
-export const stateRecordMetric: QueryHandler = async (args, projectDir) => {
+export const stateRecordMetric: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['phase', 'plan', 'duration', 'tasks', 'files']);
   const phase = parsed.phase as string | null;
   const plan = parsed.plan as string | null;
@@ -645,14 +660,25 @@ export const stateRecordMetric: QueryHandler = async (args, projectDir) => {
     return { data: { error: 'phase, plan, and duration required' } };
   }
 
+  // CJS `cmdStateRecordMetric` contract: error out if STATE.md doesn't exist
+  // rather than auto-creating it (which `readModifyWriteStateMd` would do).
+  const statePath = planningPaths(projectDir, workstream).state;
+  try {
+    await readFile(statePath, 'utf-8');
+  } catch {
+    return { data: { error: 'STATE.md not found' } };
+  }
+
   let recorded = false;
+  let created = false;
   await readModifyWriteStateMd(projectDir, (content) => {
     const metricsPattern = /(##\s*Performance Metrics[\s\S]*?\n\|[^\n]+\n\|[-|\s]+\n)([\s\S]*?)(?=\n##|\n$|$)/i;
     const metricsMatch = content.match(metricsPattern);
 
+    const newRow = `| Phase ${phase} P${plan} | ${duration} | ${tasks} tasks | ${files} files |`;
+
     if (metricsMatch) {
       let tableBody = metricsMatch[2].trimEnd();
-      const newRow = `| Phase ${phase} P${plan} | ${duration} | ${tasks} tasks | ${files} files |`;
 
       if (tableBody.trim() === '' || tableBody.includes('None yet')) {
         tableBody = newRow;
@@ -662,14 +688,28 @@ export const stateRecordMetric: QueryHandler = async (args, projectDir) => {
 
       content = content.replace(metricsPattern, (_match, header: string) => `${header}${tableBody}\n`);
       recorded = true;
+    } else {
+      // Section absent — DWIM: auto-create canonical ## Performance Metrics scaffold,
+      // then append the row. Matches CJS state.cjs DWIM behavior.
+      const scaffold = [
+        '',
+        '## Performance Metrics',
+        '',
+        '| Phase | Plan | Duration | Notes |',
+        '|-------|------|----------|-------|',
+        newRow,
+        '',
+      ].join('\n');
+      content = content.trimEnd() + '\n' + scaffold;
+      recorded = true;
+      created = true;
     }
     return content;
-  });
+  }, workstream);
 
-  if (recorded) {
-    return { data: { recorded: true, phase, plan, duration } };
-  }
-  return { data: { recorded: false, reason: 'Performance Metrics section not found in STATE.md' } };
+  const result: Record<string, unknown> = { recorded: true, phase, plan, duration };
+  if (created) result.created = true;
+  return { data: result };
 };
 
 /**
@@ -681,13 +721,23 @@ export const stateRecordMetric: QueryHandler = async (args, projectDir) => {
  * @param projectDir - Project root directory
  * @returns QueryResult with { updated, percent, completed, total }
  */
-export const stateUpdateProgress: QueryHandler = async (_args, projectDir) => {
-  const phasesDir = planningPaths(projectDir).phases;
+export const stateUpdateProgress: QueryHandler = async (_args, projectDir, workstream) => {
+  // CJS `cmdStateUpdateProgress` contract: error out when STATE.md is missing.
+  // Without this check the SDK silently returns `{ updated: false }` with no
+  // STATE.md-aware reason, masking the missing-file condition.
+  const statePath = planningPaths(projectDir, workstream).state;
+  try {
+    await readFile(statePath, 'utf-8');
+  } catch {
+    return { data: { error: 'STATE.md not found' } };
+  }
+
+  const phasesDir = planningPaths(projectDir, workstream).phases;
   let totalPlans = 0;
   let totalSummaries = 0;
 
   try {
-    const isDirInMilestone = await getMilestonePhaseFilter(projectDir);
+    const isDirInMilestone = await getMilestonePhaseFilter(projectDir, workstream);
     const entries = await readdir(phasesDir, { withFileTypes: true });
     const phaseDirs = entries
       .filter(e => e.isDirectory())
@@ -720,7 +770,7 @@ export const stateUpdateProgress: QueryHandler = async (_args, projectDir) => {
       return content.replace(plainProgressPattern, (_match, prefix: string) => `${prefix}${progressStr}`);
     }
     return content;
-  });
+  }, workstream);
 
   if (updated) {
     return { data: { updated: true, percent, completed: totalSummaries, total: totalPlans, bar: progressStr } };
@@ -734,7 +784,7 @@ export const stateUpdateProgress: QueryHandler = async (_args, projectDir) => {
  * Appends a decision to the Decisions section. Removes placeholder text.
  * argv matches `gsd-tools.cjs`: `--phase`, `--summary`, `--rationale`, etc.
  */
-export const stateAddDecision: QueryHandler = async (args, projectDir) => {
+export const stateAddDecision: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['phase', 'summary', 'summary-file', 'rationale', 'rationale-file']);
   const phase = parsed.phase as string | null;
   let summaryText: string | null = null;
@@ -763,7 +813,7 @@ export const stateAddDecision: QueryHandler = async (args, projectDir) => {
   }
 
   const entry = `- [Phase ${phase || '?'}]: ${summaryText}${rationaleText ? ` — ${rationaleText}` : ''}`;
-  let added = false;
+  let created = false;
 
   await readModifyWriteStateMd(projectDir, (content) => {
     const sectionPattern = /(###?\s*(?:Decisions|Decisions Made|Accumulated.*Decisions)\s*\n)([\s\S]*?)(?=\n###?|\n##[^#]|$)/i;
@@ -773,23 +823,29 @@ export const stateAddDecision: QueryHandler = async (args, projectDir) => {
       let sectionBody = match[2];
       sectionBody = sectionBody.replace(/None yet\.?\s*\n?/gi, '').replace(/No decisions yet\.?\s*\n?/gi, '');
       sectionBody = sectionBody.trimEnd() + '\n' + entry + '\n';
-      content = content.replace(sectionPattern, (_match, header: string) => `${header}${sectionBody}`);
-      added = true;
+      return content.replace(sectionPattern, (_match, header: string) => `${header}${sectionBody}`);
     }
-    return content;
-  });
 
-  if (added) {
-    return { data: { added: true, decision: entry } };
-  }
-  return { data: { added: false, reason: 'Decisions section not found in STATE.md' } };
+    // Section absent — DWIM (CJS state.cjs:481-492): auto-create the
+    // canonical `## Decisions` scaffold and append the entry. Matches the
+    // begin-phase / advance-plan DWIM behavior. Without this, callers that
+    // never touched the Decisions section see `{added: false}` even though
+    // STATE.md is writable. Bug #3286.
+    const scaffold = ['', '## Decisions', '', entry, ''].join('\n');
+    created = true;
+    return content.trimEnd() + '\n' + scaffold;
+  }, workstream);
+
+  const result: Record<string, unknown> = { added: true, decision: entry };
+  if (created) result['created'] = true;
+  return { data: result };
 };
 
 /**
  * Query handler for state.add-blocker command.
  * argv: `--text`, `--text-file` (see `gsd-tools.cjs`).
  */
-export const stateAddBlocker: QueryHandler = async (args, projectDir) => {
+export const stateAddBlocker: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['text', 'text-file']);
   let blockerText: string | null = null;
 
@@ -810,7 +866,7 @@ export const stateAddBlocker: QueryHandler = async (args, projectDir) => {
   }
 
   const entry = `- ${blockerText}`;
-  let added = false;
+  let created = false;
 
   await readModifyWriteStateMd(projectDir, (content) => {
     const sectionPattern = /(###?\s*(?:Blockers|Blockers\/Concerns|Concerns)\s*\n)([\s\S]*?)(?=\n###?|\n##[^#]|$)/i;
@@ -820,27 +876,39 @@ export const stateAddBlocker: QueryHandler = async (args, projectDir) => {
       let sectionBody = match[2];
       sectionBody = sectionBody.replace(/None\.?\s*\n?/gi, '').replace(/None yet\.?\s*\n?/gi, '');
       sectionBody = sectionBody.trimEnd() + '\n' + entry + '\n';
-      content = content.replace(sectionPattern, (_match, header: string) => `${header}${sectionBody}`);
-      added = true;
+      return content.replace(sectionPattern, (_match, header: string) => `${header}${sectionBody}`);
     }
-    return content;
-  });
 
-  if (added) {
-    return { data: { added: true, blocker: blockerText } };
-  }
-  return { data: { added: false, reason: 'Blockers section not found in STATE.md' } };
+    // Section absent — DWIM (CJS state.cjs:532-542): auto-create the
+    // canonical `### Blockers` scaffold and append the entry. Bug #3286
+    // parity — matches stateAddDecision DWIM above.
+    const scaffold = ['', '### Blockers', '', entry, ''].join('\n');
+    created = true;
+    return content.trimEnd() + '\n' + scaffold;
+  }, workstream);
+
+  const result: Record<string, unknown> = { added: true, blocker: blockerText };
+  if (created) result['created'] = true;
+  return { data: result };
 };
 
 /**
  * Query handler for state.resolve-blocker command.
  * argv: `--text` (see `gsd-tools.cjs`).
  */
-export const stateResolveBlocker: QueryHandler = async (args, projectDir) => {
+export const stateResolveBlocker: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['text']);
   const searchText = parsed.text as string | null;
   if (!searchText) {
     return { data: { error: 'text required' } };
+  }
+
+  // CJS `cmdStateResolveBlocker` contract: error out when STATE.md is missing.
+  const statePath = planningPaths(projectDir, workstream).state;
+  try {
+    await readFile(statePath, 'utf-8');
+  } catch {
+    return { data: { error: 'STATE.md not found' } };
   }
 
   let removedMatchingLine = false;
@@ -873,25 +941,175 @@ export const stateResolveBlocker: QueryHandler = async (args, projectDir) => {
       content = content.replace(sectionPattern, (_match, header: string) => `${header}${newBody}`);
     }
     return content;
-  });
+  }, workstream);
 
-  if (removedMatchingLine) {
+  // CJS `cmdStateResolveBlocker` contract: `resolved: true` whenever the
+  // Blockers section was found, even if no line matched. The semantic is
+  // "the resolve operation ran against a Blockers section" rather than "a
+  // specific line was found and removed". Only `resolved: false` when the
+  // Blockers section itself is missing.
+  if (blockersSectionFound) {
     return { data: { resolved: true, blocker: searchText } };
   }
-  return { data: { resolved: false, reason: blockersSectionFound
-    ? 'Blocker text not found in STATE.md'
-    : 'Blockers section not found in STATE.md'
-  } };
+  return { data: { resolved: false, reason: 'Blockers section not found in STATE.md' } };
+};
+
+// ─── state.add-roadmap-evolution ─────────────────────────────────────────
+
+const VALID_ROADMAP_EVOLUTION_ACTIONS = new Set([
+  'inserted', 'removed', 'moved', 'edited', 'added',
+]);
+
+/**
+ * Format a canonical Roadmap Evolution entry line.
+ *
+ * Shapes match existing workflow templates (`insert-phase.md`, `add-phase.md`):
+ *   - inserted: `- Phase {phase} inserted after Phase {after}: {note} (URGENT)`
+ *   - added:    `- Phase {phase} added: {note}`
+ *   - removed:  `- Phase {phase} removed: {note}`
+ *   - moved:    `- Phase {phase} moved: {note}`
+ *   - edited:   `- Phase {phase} edited: {note}`
+ */
+function formatRoadmapEvolutionEntry(opts: {
+  phase: string;
+  action: string;
+  note?: string | null;
+  after?: string | null;
+  urgent?: boolean;
+}): string {
+  const { phase, action, note, after, urgent } = opts;
+  const trimmedNote = note ? note.trim() : '';
+  let line: string;
+  if (action === 'inserted') {
+    const afterClause = after ? ` after Phase ${after}` : '';
+    line = `- Phase ${phase} inserted${afterClause}`;
+    if (trimmedNote) line += `: ${trimmedNote}`;
+    if (urgent) line += ' (URGENT)';
+  } else {
+    // added | removed | moved | edited
+    line = `- Phase ${phase} ${action}`;
+    if (trimmedNote) line += `: ${trimmedNote}`;
+  }
+  return line;
+}
+
+/**
+ * Query handler for `state.add-roadmap-evolution`.
+ *
+ * Appends a single entry to the `### Roadmap Evolution` subsection under
+ * `## Accumulated Context` in STATE.md. Creates the subsection if missing.
+ * Deduplicates on exact line match against existing entries.
+ *
+ * Canonical replacement for the raw `Edit`/`Write` instructions in
+ * `insert-phase.md` / `add-phase.md` step "update_project_state" so that
+ * projects with a `protect-files.sh` PreToolUse hook blocking direct
+ * STATE.md writes still update the Roadmap Evolution log.
+ *
+ * argv: `--phase`, `--action` (inserted|removed|moved|edited|added),
+ *       `--note` (optional), `--after` (optional, for `inserted`),
+ *       `--urgent` (boolean flag, appends "(URGENT)" when action=inserted).
+ *
+ * Returns `{ added: true, entry }` on success, or
+ * `{ added: false, reason: 'duplicate', entry }` when an identical line
+ * already exists.
+ *
+ * Throws `GSDError` with `ErrorClassification.Validation` when required
+ * inputs are missing or `--action` is not in the allowed set.
+ *
+ * Atomicity: goes through `readModifyWriteStateMd` which holds a lockfile
+ * across read -> transform -> write. Matches sibling mutation handlers.
+ */
+export const stateAddRoadmapEvolution: QueryHandler = async (args, projectDir, workstream) => {
+  const parsed = parseNamedArgs(args, ['phase', 'action', 'note', 'after'], ['urgent']);
+  const phase = (parsed.phase as string | null) ?? null;
+  const action = (parsed.action as string | null) ?? null;
+  const note = (parsed.note as string | null) ?? null;
+  const after = (parsed.after as string | null) ?? null;
+  const urgent = Boolean(parsed.urgent);
+
+  if (!phase) {
+    throw new GSDError('phase required for state.add-roadmap-evolution', ErrorClassification.Validation);
+  }
+  if (!action) {
+    throw new GSDError('action required for state.add-roadmap-evolution', ErrorClassification.Validation);
+  }
+  if (!VALID_ROADMAP_EVOLUTION_ACTIONS.has(action)) {
+    throw new GSDError(
+      `invalid action "${action}" (expected one of: ${Array.from(VALID_ROADMAP_EVOLUTION_ACTIONS).join(', ')})`,
+      ErrorClassification.Validation,
+    );
+  }
+
+  const entry = formatRoadmapEvolutionEntry({ phase, action, note, after, urgent });
+
+  let added = false;
+  let duplicate = false;
+
+  await readModifyWriteStateMd(projectDir, (content) => {
+    // Match `### Roadmap Evolution` subsection up to the next heading or EOF.
+    const subsectionPattern = /(###\s*Roadmap Evolution\s*\n)([\s\S]*?)(?=\n###?\s|\n##[^#]|$)/i;
+    const match = content.match(subsectionPattern);
+
+    if (match) {
+      let sectionBody = match[2];
+      // Dedupe: exact line match against any existing entry line.
+      const existingLines = sectionBody.split('\n').map(l => l.trim());
+      if (existingLines.some(l => l === entry.trim())) {
+        duplicate = true;
+        return content;
+      }
+      // Strip placeholder "None" / "None yet." lines.
+      sectionBody = sectionBody.replace(/^None(?:\s+yet)?\.?\s*$/gim, '');
+      sectionBody = sectionBody.trimEnd() + '\n' + entry + '\n';
+      content = content.replace(subsectionPattern, (_m, header: string) => `${header}${sectionBody}`);
+      added = true;
+      return content;
+    }
+
+    // Subsection missing — create it.
+    const accumulatedPattern = /(##\s*Accumulated Context\s*\n)/i;
+    const newSubsection = `\n### Roadmap Evolution\n\n${entry}\n`;
+
+    if (accumulatedPattern.test(content)) {
+      // Insert immediately after the "## Accumulated Context" header.
+      content = content.replace(accumulatedPattern, (_m, header: string) => `${header}${newSubsection}`);
+      added = true;
+      return content;
+    }
+
+    // No Accumulated Context section either — append both at EOF.
+    const suffix = `\n## Accumulated Context\n${newSubsection}`;
+    content = content.trimEnd() + suffix + '\n';
+    added = true;
+    return content;
+  }, workstream);
+
+  if (duplicate) {
+    return { data: { added: false, reason: 'duplicate', entry } };
+  }
+  if (added) {
+    return { data: { added: true, entry } };
+  }
+  // Unreachable given the logic above, but defensive.
+  return { data: { added: false, reason: 'unknown', entry } };
 };
 
 /**
  * Query handler for state.record-session command.
  * argv: `--stopped-at`, `--resume-file` (see `cmdStateRecordSession` in `state.cjs`).
  */
-export const stateRecordSession: QueryHandler = async (args, projectDir) => {
+export const stateRecordSession: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['stopped-at', 'resume-file']);
   const stoppedAt = parsed['stopped-at'] as string | null | undefined;
   const resumeFile = ((parsed['resume-file'] as string | null) ?? 'None');
+
+  // CJS `cmdStateRecordSession` contract: error out when STATE.md is missing.
+  const statePath = planningPaths(projectDir, workstream).state;
+  try {
+    await readFile(statePath, 'utf-8');
+  } catch {
+    return { data: { error: 'STATE.md not found' } };
+  }
 
   const now = new Date().toISOString();
   const updated: string[] = [];
@@ -913,7 +1131,7 @@ export const stateRecordSession: QueryHandler = async (args, projectDir) => {
     if (result) { content = result; updated.push('Resume File'); }
 
     return content;
-  });
+  }, workstream);
 
   if (updated.length > 0) {
     return { data: { recorded: true, updated } };
@@ -924,7 +1142,7 @@ export const stateRecordSession: QueryHandler = async (args, projectDir) => {
 /**
  * Query handler for state.planned-phase — port of `cmdStatePlannedPhase` from `state.cjs`.
  */
-export const statePlannedPhase: QueryHandler = async (args, projectDir) => {
+export const statePlannedPhase: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['phase', 'name', 'plans']);
   const phaseNumber = parsed.phase as string | null;
   const plansRaw = parsed.plans as string | null;
@@ -943,7 +1161,7 @@ export const statePlannedPhase: QueryHandler = async (args, projectDir) => {
 
   const phaseLabel = String(phaseNumber).trim();
 
-  const statePath = planningPaths(projectDir).state;
+  const statePath = planningPaths(projectDir, workstream).state;
   if (!existsSync(statePath)) {
     return { data: { error: 'STATE.md not found' } };
   }
@@ -975,9 +1193,127 @@ export const statePlannedPhase: QueryHandler = async (args, projectDir) => {
       lastActivity: `${today} -- Phase ${phaseLabel} planning complete`,
     });
     return content;
-  });
+  }, workstream);
 
   return { data: { updated, phase: phaseNumber, plan_count: planCount } };
+};
+
+// ─── stateMilestoneSwitch (bug #2630) ─────────────────────────────────────
+
+/**
+ * Query handler for `state.milestone-switch` — resets STATE.md for a new
+ * milestone cycle (bug #2630 regression guard).
+ *
+ * The `/gsd-new-milestone` workflow only rewrote STATE.md's body (Current
+ * Position section). The YAML frontmatter (`milestone`, `milestone_name`,
+ * `status`, `progress.*`) was never touched on a mid-flight switch, so queries
+ * that read frontmatter (`state.json`, `getMilestoneInfo`, every handler that
+ * calls `buildStateFrontmatter`) kept reporting the old milestone and stale
+ * progress counters until the first phase advance forced a resync.
+ *
+ * This handler performs the reset atomically under the STATE.md lock:
+ * - Stomps frontmatter milestone/milestone_name with the caller-supplied
+ *   values so `parseMilestoneFromState` reports the new milestone immediately.
+ * - Resets `status` to `'planning'` (workflow is at "Defining requirements").
+ * - Resets `progress` counters to zero (new milestone, nothing executed yet).
+ * - Rewrites the `## Current Position` body to the new-milestone template so
+ *   subsequent body-derived field extraction stays consistent with frontmatter.
+ * - Preserves Accumulated Context (decisions, todos, blockers) — symmetric
+ *   with `milestone.complete` which also keeps history.
+ *
+ * Args (named, matches gsd-tools style):
+ * - `--version <vX.Y>` (required)
+ * - `--name <milestone name>` (optional; defaults to 'milestone')
+ *
+ * Sibling CJS parity: `cmdInitNewMilestone` in `init.cjs` is read-only (like
+ * the TS `initNewMilestone`). The workflow-level fix is to call
+ * `state.milestone-switch` from `/gsd-new-milestone` Step 5 in place of the
+ * manual body rewrite.
+ */
+export const stateMilestoneSwitch: QueryHandler = async (args, projectDir, workstream) => {
+  // NOTE: the CLI flag is `--milestone` (not `--version`). gsd-tools reserves
+  // `--version` as a globally-invalid help flag, so the workflow invokes this
+  // handler with `--milestone vX.Y`. The internal variable is still `version`
+  // because the value is a milestone version string.
+  const parsed = parseNamedArgs(args, ['milestone', 'name']);
+  const version = (parsed.milestone as string | null)?.trim();
+  const name = ((parsed.name as string | null) ?? 'milestone').trim() || 'milestone';
+
+  if (!version) {
+    return { data: { error: 'milestone required (--milestone <vX.Y>)' } };
+  }
+
+  const today = new Date().toISOString().split('T')[0]!;
+  const statePath = planningPaths(projectDir, workstream).state;
+  const lockPath = await acquireStateLock(statePath);
+
+  try {
+    let content = '';
+    try {
+      content = await readFile(statePath, 'utf-8');
+    } catch { /* STATE.md may not exist yet */ }
+
+    const existingFm = extractFrontmatter(content);
+    const body = stripFrontmatter(content);
+
+    // Reset Current Position section body so body-derived extraction stays
+    // consistent with the new frontmatter.
+    const positionPattern = /(##\s*Current Position\s*\n)([\s\S]*?)(?=\n##|$)/i;
+    const resetPositionBody =
+      `\nPhase: Not started (defining requirements)\n` +
+      `Plan: —\n` +
+      `Status: Defining requirements\n` +
+      `Last activity: ${today} — Milestone ${version} started\n\n`;
+    let newBody: string;
+    if (positionPattern.test(body)) {
+      newBody = body.replace(positionPattern, (_m, header: string) => `${header}${resetPositionBody}`);
+    } else {
+      // Preserve any existing body but prepend a Current Position section.
+      const preface = body.trim().length > 0 ? body : '# Project State\n';
+      newBody = `${preface.trimEnd()}\n\n## Current Position\n${resetPositionBody}`;
+    }
+
+    // Build fresh frontmatter explicitly — do NOT rely on buildStateFrontmatter
+    // here, because getMilestoneInfo reads the ON-DISK STATE.md and would
+    // return the OLD milestone until we write it first. This is the crux of
+    // bug #2630: any sync-based approach races against the very file it is
+    // about to rewrite.
+    const fm: Record<string, unknown> = {
+      gsd_state_version: '1.0',
+      milestone: version,
+      milestone_name: name,
+      status: 'planning',
+      last_updated: new Date().toISOString(),
+      last_activity: today,
+      progress: {
+        total_phases: 0,
+        completed_phases: 0,
+        total_plans: 0,
+        completed_plans: 0,
+        percent: 0,
+      },
+    };
+    // Preserve frontmatter-only fields the caller may still care about
+    // (paused_at cleared deliberately — a new milestone is a fresh start).
+    if (existingFm.gsd_state_version) {
+      fm.gsd_state_version = existingFm.gsd_state_version;
+    }
+
+    const yamlStr = reconstructFrontmatter(fm);
+    const assembled = `---\n${yamlStr}\n---\n\n${newBody.replace(/^\n+/, '')}`;
+    await writeFile(statePath, normalizeMd(assembled), 'utf-8');
+
+    return {
+      data: {
+        switched: true,
+        version,
+        name,
+        status: 'planning',
+      },
+    };
+  } finally {
+    await releaseStateLock(lockPath);
+  }
 };
 
 // ─── parseNamedArgs (matches gsd-tools.cjs) ───────────────────────────────
@@ -990,9 +1326,15 @@ function parseNamedArgs(
   const result: Record<string, string | boolean | null> = {};
   for (const flag of valueFlags) {
     const idx = args.indexOf(`--${flag}`);
-    result[flag] = idx !== -1 && args[idx + 1] !== undefined && !args[idx + 1].startsWith('--')
-      ? args[idx + 1]
-      : null;
+    if (idx === -1) {
+      result[flag] = null;
+      continue;
+    }
+    const value = args[idx + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new GSDError(`missing value for --${flag}`, ErrorClassification.Validation);
+    }
+    result[flag] = value;
   }
   for (const flag of booleanFlags) {
     result[flag] = args.includes(`--${flag}`);
@@ -1009,7 +1351,7 @@ function parseNamedArgs(
  * Writes `WAITING.json` under both `.gsd/` and `.planning/` so readers that only
  * watch one location (e.g. init workflows) still observe the signal.
  */
-export const stateSignalWaiting: QueryHandler = async (args, projectDir) => {
+export const stateSignalWaiting: QueryHandler = async (args, projectDir, _workstream) => {
   const parsed = parseNamedArgs(args, ['type', 'question', 'options', 'phase']);
   const type = (parsed.type as string | null) || 'decision_point';
   const question = (parsed.question as string | null) || null;
@@ -1047,7 +1389,7 @@ export const stateSignalWaiting: QueryHandler = async (args, projectDir) => {
 /**
  * Port of `cmdSignalResume` from state.cjs.
  */
-export const stateSignalResume: QueryHandler = async (_args, projectDir) => {
+export const stateSignalResume: QueryHandler = async (_args, projectDir, _workstream) => {
   const paths = [
     join(projectDir, '.gsd', 'WAITING.json'),
     join(projectDir, '.planning', 'WAITING.json'),
@@ -1069,8 +1411,8 @@ export const stateSignalResume: QueryHandler = async (_args, projectDir) => {
 /**
  * Port of `cmdStateValidate` from state.cjs.
  */
-export const stateValidate: QueryHandler = async (_args, projectDir) => {
-  const paths = planningPaths(projectDir);
+export const stateValidate: QueryHandler = async (_args, projectDir, workstream) => {
+  const paths = planningPaths(projectDir, workstream);
   const statePath = paths.state;
   if (!existsSync(statePath)) {
     return { data: { error: 'STATE.md not found' } };
@@ -1097,8 +1439,10 @@ export const stateValidate: QueryHandler = async (_args, projectDir) => {
       if (phaseDir) {
         const phaseDirPath = join(phasesDir, phaseDir.name);
         const files = readdirSync(phaseDirPath);
-        const diskPlans = files.filter(f => /-PLAN\.md$/i.test(f)).length;
-        const diskSummaries = files.filter(f => /-SUMMARY\.md$/i.test(f)).length;
+        // Bug #3257 parity: count nested plans/ subdirectory via scanPhasePlans
+        // so /executing/i status checks below see the full plan count
+        // regardless of whether the planner used the flat or nested layout.
+        const { planCount: diskPlans, summaryCount: diskSummaries } = scanPhasePlans(phaseDirPath);
 
         if (totalPlansInPhase !== null && diskPlans !== totalPlansInPhase) {
           warnings.push(
@@ -1140,9 +1484,9 @@ export const stateValidate: QueryHandler = async (_args, projectDir) => {
 /**
  * Port of `cmdStateSync` from state.cjs. Supports `--verify` dry-run.
  */
-export const stateSync: QueryHandler = async (args, projectDir) => {
+export const stateSync: QueryHandler = async (args, projectDir, workstream) => {
   const verify = args.includes('--verify');
-  const paths = planningPaths(projectDir);
+  const paths = planningPaths(projectDir, workstream);
   const statePath = paths.state;
   if (!existsSync(statePath)) {
     return { data: { error: 'STATE.md not found' } };
@@ -1169,16 +1513,20 @@ export const stateSync: QueryHandler = async (args, projectDir) => {
 
   let totalDiskPlans = 0;
   let totalDiskSummaries = 0;
+  let diskCompletedPhases = 0;
   let highestIncompletePhase: string | null = null;
   let highestIncompletePhaseplanCount = 0;
 
   for (const dir of entries) {
     const dirPath = join(phasesDir, dir);
-    const files = readdirSync(dirPath);
-    const plans = files.filter(f => /-PLAN\.md$/i.test(f)).length;
-    const summaries = files.filter(f => /-SUMMARY\.md$/i.test(f)).length;
+    // Bug #3257 parity: scanPhasePlans handles nested plans/ subdirectories
+    // and the extended filename forms (e.g. 5-PLAN-01-setup.md). Without
+    // this, state.sync sees 0 plans for canonical nested layouts and emits
+    // bogus "Total Plans in Phase 0 -> 0" sync updates.
+    const { planCount: plans, summaryCount: summaries, completed } = scanPhasePlans(dirPath);
     totalDiskPlans += plans;
     totalDiskSummaries += summaries;
+    if (completed) diskCompletedPhases++;
 
     const phaseMatch = dir.match(/^(\d+[A-Z]?(?:\.\d+)*)/i);
     if (phaseMatch && plans > 0 && summaries < plans) {
@@ -1186,6 +1534,12 @@ export const stateSync: QueryHandler = async (args, projectDir) => {
       highestIncompletePhaseplanCount = plans;
     }
   }
+
+  // CJS parity: total_phases for the percent calculation is the count of
+  // phase directories in the active milestone (or the actual count on disk
+  // if no milestone filter is configured). Required so the phase-fraction
+  // cap in computeProgressPercent (#3242 Bug B) sees the right denominator.
+  const syncTotalPhases = entries.length;
 
   const runModifier = (modified: string): string => {
     let m = modified;
@@ -1198,7 +1552,17 @@ export const stateSync: QueryHandler = async (args, projectDir) => {
       }
     }
 
-    const percent = totalDiskPlans > 0 ? Math.min(100, Math.round((totalDiskSummaries / totalDiskPlans) * 100)) : 0;
+    // Use min(plan_fraction, phase_fraction) so ROADMAP-declared-but-
+    // unrealized future phases cap the reported percent (CJS bug #3242 Bug B
+    // parity). Fall back to 0 when computeProgressPercent returns null
+    // (totalDiskPlans === 0 case).
+    const computedPercent = computeProgressPercent(
+      totalDiskSummaries,
+      totalDiskPlans,
+      diskCompletedPhases,
+      syncTotalPhases,
+    );
+    const percent = computedPercent !== null ? computedPercent : 0;
     const currentProgress = stateExtractField(m, 'Progress');
     if (currentProgress) {
       const currentPercent = parseInt(currentProgress.replace(/[^\d]/g, ''), 10);
@@ -1230,7 +1594,7 @@ export const stateSync: QueryHandler = async (args, projectDir) => {
     return { data: { synced: false, changes, dry_run: true } };
   }
 
-  await readModifyWriteStateMd(projectDir, (body) => runModifier(body));
+  await readModifyWriteStateMd(projectDir, (body) => runModifier(body), workstream);
 
   return { data: { synced: true, changes, dry_run: false } };
 };
@@ -1355,7 +1719,7 @@ function prunePass(content: string, cutoff: number): { newContent: string; archi
  * Port of `cmdStatePrune` from state.cjs.
  * Args: `--keep-recent N` (default 3), `--dry-run`, `--silent` (omit extra logging fields — no-op in SDK JSON).
  */
-export const statePrune: QueryHandler = async (args, projectDir) => {
+export const statePrune: QueryHandler = async (args, projectDir, workstream) => {
   const parsed = parseNamedArgs(args, ['keep-recent'], ['dry-run', 'silent']);
   const parsedKeepRecent = Number.parseInt(String(parsed['keep-recent'] ?? '3'), 10);
   if (!Number.isInteger(parsedKeepRecent) || parsedKeepRecent < 0) {
@@ -1364,15 +1728,17 @@ export const statePrune: QueryHandler = async (args, projectDir) => {
   const keepRecent = parsedKeepRecent;
   const dryRun = parsed['dry-run'] === true;
 
-  const paths = planningPaths(projectDir);
+  const paths = planningPaths(projectDir, workstream);
   const statePath = paths.state;
   if (!existsSync(statePath)) {
     return { data: { error: 'STATE.md not found' } };
   }
 
   const fullContent = await readFile(statePath, 'utf-8');
+  // Align with CJS state.cjs:1615 — read Current Phase from the body text first,
+  // fall back to 0 (same as CJS `parseInt(..., 10) || 0`).
   const currentPhaseRaw = stateExtractField(fullContent, 'Current Phase');
-  const currentPhase = parseInt(String(currentPhaseRaw ?? ''), 10) || 0;
+  const currentPhase = parseInt(String(currentPhaseRaw ?? '').trim(), 10) || 0;
   const cutoff = currentPhase - keepRecent;
 
   if (cutoff <= 0) {
@@ -1411,7 +1777,7 @@ export const statePrune: QueryHandler = async (args, projectDir) => {
     const result = prunePass(b, cutoff);
     archived.push(...result.archivedSections);
     return result.newContent;
-  });
+  }, workstream);
 
   const archivePath = join(paths.planning, 'STATE-ARCHIVE.md');
   const totalPruned = archived.reduce((sum, s) => sum + s.count, 0);

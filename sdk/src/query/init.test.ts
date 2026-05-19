@@ -325,10 +325,87 @@ describe('initExecutePhase', () => {
     expect(data.milestone_version).toBeDefined();
   });
 
+  it('accepts --phase flag form for existing phase (#3387)', async () => {
+    const result = await initExecutePhase(['--phase', '9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
+  it('accepts --phase=value flag form for existing phase (#3387)', async () => {
+    const result = await initExecutePhase(['--phase=9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
   it('returns error when phase arg missing', async () => {
     const result = await initExecutePhase([], tmpDir);
     const data = result.data as Record<string, unknown>;
     expect(data.error).toBeDefined();
+  });
+
+  it('honors legacy top-level branching_strategy in config for execute-phase init (#3055)', async () => {
+    await writeFile(join(tmpDir, '.planning', 'config.json'), JSON.stringify({
+      model_profile: 'balanced',
+      commit_docs: false,
+      branching_strategy: 'phase',
+      workflow: { research: true, plan_check: true, verifier: true, nyquist_validation: true },
+    }));
+
+    const result = await initExecutePhase(['9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.branching_strategy).toBe('phase');
+    expect(typeof data.branch_name).toBe('string');
+  });
+
+  it('keeps same-milestone archived phase directory instead of nulling it (#3469)', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'gsd-init-3469-'));
+    try {
+      await mkdir(join(tmp, '.planning', 'milestones', 'v2.0-phases', '02-auth'), { recursive: true });
+      await writeFile(join(tmp, '.planning', 'PROJECT.md'), '# Project\n\n## What This Is\n\nA project.\n\n## Core Value\n\nValue here.\n\n## Requirements\n\n- Req 1\n');
+      await writeFile(join(tmp, '.planning', 'ROADMAP.md'), [
+        '# Roadmap',
+        '',
+        '## v2.0: Current',
+        '',
+        '### Phase 2: Auth',
+        '',
+        '**Goal:** Implement auth',
+        '',
+      ].join('\n'));
+      await writeFile(join(tmp, '.planning', 'STATE.md'), [
+        '---',
+        'milestone: v2.0',
+        'status: executing',
+        '---',
+        '',
+        '# Session State',
+      ].join('\n'));
+      await writeFile(join(tmp, '.planning', 'config.json'), JSON.stringify({
+        model_profile: 'balanced',
+        commit_docs: false,
+        git: {
+          branching_strategy: 'none',
+          phase_branch_template: 'gsd/phase-{phase}-{slug}',
+          milestone_branch_template: 'gsd/{milestone}-{slug}',
+          quick_branch_template: null,
+        },
+        workflow: { research: true, plan_check: true, verifier: true, nyquist_validation: true },
+      }));
+      await writeFile(
+        join(tmp, '.planning', 'milestones', 'v2.0-phases', '02-auth', '02-01-PLAN.md'),
+        '# Plan\n',
+      );
+
+      const result = await initExecutePhase(['2'], tmp);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_found).toBe(true);
+      expect(data.phase_dir).toBe('.planning/milestones/v2.0-phases/02-auth');
+      expect(data.plan_count).toBe(1);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -346,10 +423,106 @@ describe('initPlanPhase', () => {
     expect(data.project_root).toBe(tmpDir);
   });
 
+  it('accepts --phase flag form for existing phase (#3387)', async () => {
+    const result = await initPlanPhase(['--phase', '9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
+  it('accepts --phase=value flag form for existing phase (#3387)', async () => {
+    const result = await initPlanPhase(['--phase=9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
   it('returns error when phase arg missing', async () => {
     const result = await initPlanPhase([], tmpDir);
     const data = result.data as Record<string, unknown>;
     expect(data.error).toBeDefined();
+  });
+
+  // #3569: init.plan-phase must surface a phase_status field so the
+  // /gsd-plan-phase workflow can short-circuit on closed phases instead of
+  // happily replanning over shipped code. Reuses the project-wide phase
+  // lifecycle vocabulary from determinePhaseStatus (Pending | Planned |
+  // In Progress | Executed | Complete | Needs Review).
+  describe('phase_status (#3569)', () => {
+    it('reports "Complete" when summaries match plans and VERIFICATION.md status: passed', async () => {
+      // Phase 9 fixture already has 1 plan + 1 summary; add a passing VERIFICATION.
+      await writeFile(
+        join(tmpDir, '.planning', 'phases', '09-foundation', '09-VERIFICATION.md'),
+        ['---', 'phase: 09', 'status: passed', 'score: 100', 'verified: true', '---', '# Verification'].join('\n'),
+      );
+
+      const result = await initPlanPhase(['9'], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_status).toBe('Complete');
+    });
+
+    it('reports "Planned" when plans exist but no summaries written', async () => {
+      // Phase 10 has no plan files in the beforeEach fixture. Add a plan to flip
+      // it from "Pending" (no plans) to "Planned" (plans, no summaries).
+      await writeFile(
+        join(tmpDir, '.planning', 'phases', '10-read-only-queries', '10-01-PLAN.md'),
+        ['---', 'phase: 10-read-only-queries', 'plan: 01', '---', '<objective>x</objective>'].join('\n'),
+      );
+
+      const result = await initPlanPhase(['10'], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_status).toBe('Planned');
+    });
+
+    it('reports "Pending" when phase has no plans yet', async () => {
+      const result = await initPlanPhase(['10'], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_status).toBe('Pending');
+    });
+
+    it('reports "Executed" when summaries match plans but VERIFICATION.md is absent', async () => {
+      // Phase 9 fixture: 1 plan, 1 summary, no VERIFICATION yet — executed but
+      // not closed. This is the regression hot zone: pre-fix, init.plan-phase
+      // gave no signal here, so the workflow couldn't distinguish this from
+      // an already-closed phase either.
+      const result = await initPlanPhase(['9'], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_status).toBe('Executed');
+    });
+  });
+
+  // #2769: extractReqIds must accept all bold/colon variants of the
+  // Requirements header. The forms render identically in markdown but differ
+  // textually; the previous regex only matched **Requirements**: (colon
+  // outside bold) and silently returned null for **Requirements:** (colon
+  // inside bold) and **Requirements** : (spaced).
+  describe.each([
+    { name: 'colon inside bold', header: '**Requirements:** RV-01, RV-02' },
+    { name: 'colon outside bold', header: '**Requirements**: RV-01, RV-02' },
+    { name: 'space before colon', header: '**Requirements** : RV-01, RV-02' },
+  ])('phase_req_ids extraction (#2769)', ({ name, header }) => {
+    it(`parses Requirements header with ${name}`, async () => {
+      // Overwrite ROADMAP.md so phase 9 carries the variant header.
+      await writeFile(join(tmpDir, '.planning', 'ROADMAP.md'), [
+        '# Roadmap',
+        '',
+        '## v3.0: SDK-First Migration',
+        '',
+        '### Phase 9: Foundation',
+        '',
+        '**Goal:** Build foundation',
+        header,
+        '',
+        '### Phase 10: Read-Only Queries',
+        '',
+        '**Goal:** Implement queries',
+        '',
+      ].join('\n'));
+
+      const result = await initPlanPhase(['9'], tmpDir);
+      const data = result.data as Record<string, unknown>;
+      expect(data.phase_req_ids).toBe('RV-01, RV-02');
+    });
   });
 });
 
@@ -400,6 +573,44 @@ describe('initVerifyWork', () => {
     expect(data.project_root).toBe(tmpDir);
   });
 
+  it('accepts --phase flag form for existing phase (#3387)', async () => {
+    const result = await initVerifyWork(['--phase', '9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
+  it('accepts --phase=value flag form for existing phase (#3387)', async () => {
+    const result = await initVerifyWork(['--phase=9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
+  it('resolves workstream-scoped phases when workstream is provided', async () => {
+    const wsDir = join(tmpDir, '.planning', 'workstreams', 'delivery');
+    await mkdir(join(wsDir, 'phases', '32-shipment-creation-tracking-numbers-print-forms'), { recursive: true });
+    await writeFile(join(wsDir, 'ROADMAP.md'), [
+      '# Roadmap',
+      '',
+      '## v1.0: Delivery',
+      '',
+      '### Phase 32: Shipment Creation Tracking Numbers Print Forms',
+      '',
+      '**Goal:** Ship orders.',
+      '',
+    ].join('\n'));
+
+    const result = await initVerifyWork(['32'], tmpDir, 'delivery');
+    const data = result.data as Record<string, unknown>;
+
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('32');
+    expect(data.phase_dir).toBe(
+      '.planning/workstreams/delivery/phases/32-shipment-creation-tracking-numbers-print-forms',
+    );
+  });
+
   it('returns error when phase arg missing', async () => {
     const result = await initVerifyWork([], tmpDir);
     const data = result.data as Record<string, unknown>;
@@ -417,6 +628,20 @@ describe('initPhaseOp', () => {
     expect(data.has_context).toBe(true);
     expect(data.plan_count).toBeGreaterThanOrEqual(1);
     expect(data.project_root).toBe(tmpDir);
+  });
+
+  it('accepts --phase flag form for existing phase (#3387)', async () => {
+    const result = await initPhaseOp(['--phase', '9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
+  });
+
+  it('accepts --phase=value flag form for existing phase (#3387)', async () => {
+    const result = await initPhaseOp(['--phase=9'], tmpDir);
+    const data = result.data as Record<string, unknown>;
+    expect(data.phase_found).toBe(true);
+    expect(data.phase_number).toBe('09');
   });
 });
 
@@ -446,6 +671,51 @@ describe('initMilestoneOp', () => {
     expect(data.phase_count).toBeGreaterThanOrEqual(0);
     expect(data.completed_phases).toBeGreaterThanOrEqual(0);
     expect(data.project_root).toBe(tmpDir);
+  });
+
+  // Regression: #2633 — ROADMAP.md is the authority for current-milestone
+  // phase count, not on-disk phase directories. After `phases clear` a new
+  // milestone's roadmap may list phases 3/4/5 while only 03 and 04 exist on
+  // disk yet. Deriving phase_count from disk yields 2 and falsely flags
+  // all_phases_complete=true once both on-disk phases have summaries.
+  it('derives phase_count from ROADMAP current milestone, not on-disk dirs (#2633)', async () => {
+    // Custom fixture overriding the shared beforeEach: simulate post-cleanup
+    // start of v1.1 where roadmap declares phases 3, 4, 5 but only 03 and 04
+    // have been materialized on disk (both with summaries).
+    const fresh = await mkdtemp(join(tmpdir(), 'gsd-init-2633-'));
+    try {
+      await mkdir(join(fresh, '.planning', 'phases', '03-alpha'), { recursive: true });
+      await mkdir(join(fresh, '.planning', 'phases', '04-beta'), { recursive: true });
+      await writeFile(join(fresh, '.planning', 'config.json'), JSON.stringify({
+        model_profile: 'balanced',
+        workflow: { nyquist_validation: true },
+      }));
+      await writeFile(join(fresh, '.planning', 'STATE.md'), [
+        '---', 'milestone: v1.1', 'milestone_name: Next', 'status: executing', '---', '',
+      ].join('\n'));
+      await writeFile(join(fresh, '.planning', 'ROADMAP.md'), [
+        '# Roadmap', '',
+        '## v1.1: Next',
+        '',
+        '### Phase 3: Alpha', '**Goal:** A', '',
+        '### Phase 4: Beta', '**Goal:** B', '',
+        '### Phase 5: Gamma', '**Goal:** C', '',
+      ].join('\n'));
+      // Both on-disk phases have summaries (completed).
+      await writeFile(join(fresh, '.planning', 'phases', '03-alpha', '03-01-SUMMARY.md'), '# S');
+      await writeFile(join(fresh, '.planning', 'phases', '04-beta', '04-01-SUMMARY.md'), '# S');
+
+      const result = await initMilestoneOp([], fresh);
+      const data = result.data as Record<string, unknown>;
+      // Roadmap declares 3 phases for the current milestone.
+      expect(data.phase_count).toBe(3);
+      // Only 2 are materialized + summarized on disk.
+      expect(data.completed_phases).toBe(2);
+      // Therefore milestone is NOT complete — phase 5 is still outstanding.
+      expect(data.all_phases_complete).toBe(false);
+    } finally {
+      await rm(fresh, { recursive: true, force: true });
+    }
   });
 });
 
